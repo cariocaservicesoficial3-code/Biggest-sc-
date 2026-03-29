@@ -1,9 +1,19 @@
 #!/usr/bin/env python3
 """
 ==============================================================
-  MANUS ACCOUNT CREATOR V7 - KALI LINUX NETHUNTER + KeX VNC
-  TURNSTILE ULTRA BYPASS - Multi-Strategy Engine
+  MANUS ACCOUNT CREATOR V7.1 - KALI LINUX NETHUNTER + KeX VNC
+  TURNSTILE ULTRA BYPASS - Multi-Strategy Engine (HOTFIX)
 ==============================================================
+
+HOTFIX V7.1 (sobre V7):
+- FIX CRÍTICO: Removida flag --disable-web-security que QUEBRAVA o Turnstile
+  (Cloudflare rejeita browsers com essa flag desde Feb 2025)
+- FIX: Removidas flags --disable-site-isolation-trials e --allow-running-insecure-content
+- FIX: Interceptor Turnstile mais seguro (não quebra se falhar)
+- FIX: Espera adequada para Turnstile carregar (wait_for_selector no iframe)
+- FIX: Re-preenchimento de email após reload nas tentativas
+- FIX: Diagnóstico de rede (verifica se challenges.cloudflare.com está acessível)
+- FIX: Estratégias 3/4 agora esperam o iframe aparecer antes de tentar clicar
 
 Mudanças V7 (sobre V6):
 - NOVA ESTRATÉGIA 1: Turnstile Render Interceptor
@@ -905,24 +915,37 @@ TURNSTILE_INTERCEPTOR_SCRIPT = """
         return ts;
     }
     
-    // Interceptar a definição de window.turnstile
+    // Interceptar a definição de window.turnstile (V7.1: mais seguro)
     try {
-        Object.defineProperty(window, 'turnstile', {
-            get: function() { return _turnstile; },
-            set: function(val) {
-                console.log('[V7 Interceptor] window.turnstile being set!');
-                _turnstile = patchTurnstile(val);
-            },
-            configurable: true,
-        });
-    } catch(e) {
-        // Se já existe, patch direto
+        // Verificar se já existe
         if (window.turnstile) {
+            console.log('[V7.1] window.turnstile já existe, patcheando direto');
             patchTurnstile(window.turnstile);
+        } else {
+            Object.defineProperty(window, 'turnstile', {
+                get: function() { return _turnstile; },
+                set: function(val) {
+                    console.log('[V7.1 Interceptor] window.turnstile being set!');
+                    try {
+                        _turnstile = patchTurnstile(val);
+                    } catch(patchErr) {
+                        console.warn('[V7.1] Patch falhou, usando original:', patchErr);
+                        _turnstile = val;
+                    }
+                },
+                configurable: true,
+                enumerable: true,
+            });
         }
+    } catch(e) {
+        console.warn('[V7.1] Interceptor setup falhou (não crítico):', e.message);
+        // NÃO quebrar - o Turnstile deve funcionar normalmente sem interceptor
+        try {
+            if (window.turnstile) patchTurnstile(window.turnstile);
+        } catch(e2) {}
     }
     
-    console.log('[V7] Turnstile interceptor installed');
+    console.log('[V7.1] Turnstile interceptor installed (safe mode)');
 })();
 """
 
@@ -939,6 +962,104 @@ def get_stealth_scripts(use_patchright=True):
     if not use_patchright:
         scripts.append(NAVIGATOR_STEALTH_SCRIPT)
     return "\n\n".join(scripts)
+
+
+# ============================================================
+# V7.1: DIAGNÓSTICO DE REDE E ESPERA PELO TURNSTILE
+# ============================================================
+async def diagnose_turnstile_loading(page, timeout=20):
+    """
+    V7.1: Verifica se o Turnstile está carregando na página.
+    Espera até o iframe aparecer ou diagnostica o problema.
+    """
+    log.info("[DIAG] Verificando carregamento do Turnstile...")
+    
+    # Verificar se challenges.cloudflare.com está acessível
+    try:
+        cf_check = await page.evaluate("""
+            () => new Promise((resolve) => {
+                const img = new Image();
+                img.onload = () => resolve('OK');
+                img.onerror = () => resolve('BLOCKED');
+                img.src = 'https://challenges.cloudflare.com/cdn-cgi/images/trace/managed/nocompress/transparent.gif?' + Date.now();
+                setTimeout(() => resolve('TIMEOUT'), 8000);
+            })
+        """)
+        log.info(f"[DIAG] challenges.cloudflare.com: {cf_check}")
+        if cf_check != 'OK':
+            log.warning(f"[DIAG] challenges.cloudflare.com NÃO acessível! ({cf_check})")
+            log.warning("[DIAG] Isso pode indicar bloqueio de rede ou DNS")
+    except Exception as e:
+        log.warning(f"[DIAG] Erro ao verificar CF: {e}")
+    
+    # Verificar se o script do Turnstile foi carregado
+    try:
+        ts_status = await page.evaluate("""
+            () => {
+                const scripts = document.querySelectorAll('script[src*="challenges.cloudflare"], script[src*="turnstile"]');
+                const hasWidget = document.querySelector('.cf-turnstile, [data-sitekey]');
+                const hasIframe = document.querySelector('iframe[src*="challenges.cloudflare"]');
+                const hasTurnstileObj = typeof window.turnstile !== 'undefined';
+                return {
+                    scriptTags: scripts.length,
+                    hasWidget: !!hasWidget,
+                    hasIframe: !!hasIframe,
+                    hasTurnstileObj: hasTurnstileObj,
+                    turnstileDataIntercepted: !!(window.__turnstileData && window.__turnstileData.intercepted),
+                };
+            }
+        """)
+        log.info(f"[DIAG] Status: {ts_status}")
+        browser_log.info(f"[DIAG] Turnstile status: {ts_status}")
+    except Exception as e:
+        log.warning(f"[DIAG] Erro ao verificar status: {e}")
+        ts_status = {}
+    
+    # Se não tem iframe ainda, esperar
+    if not ts_status.get('hasIframe'):
+        log.info(f"[DIAG] Iframe não encontrado, aguardando até {timeout}s...")
+        try:
+            await page.wait_for_selector(
+                'iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"], .cf-turnstile iframe',
+                timeout=timeout * 1000
+            )
+            log.info("[DIAG] Iframe do Turnstile APARECEU!")
+            await asyncio.sleep(2)  # Dar tempo para renderizar
+            return True
+        except:
+            log.warning(f"[DIAG] Iframe NÃO apareceu em {timeout}s")
+            
+            # Tentar verificar se a página tem algum container do Turnstile
+            try:
+                page_html = await page.evaluate("() => document.body.innerHTML.substring(0, 5000)")
+                browser_log.info(f"[DIAG] HTML parcial: {page_html[:2000]}")
+            except:
+                pass
+            
+            return False
+    
+    return True
+
+
+async def refill_email_after_reload(page, email):
+    """V7.1: Re-preenche o email após reload da página."""
+    try:
+        email_input = await page.wait_for_selector(
+            'input[type="email"], input[name="email"], input[placeholder*="email" i]',
+            timeout=10000
+        )
+        if email_input:
+            await email_input.click()
+            await asyncio.sleep(0.3)
+            await email_input.fill("")
+            for char in email:
+                await email_input.type(char, delay=random.randint(30, 80))
+            log.info(f"E-mail re-preenchido: {email}")
+            await asyncio.sleep(1)
+            return True
+    except Exception as e:
+        log.warning(f"Erro ao re-preencher email: {e}")
+    return False
 
 
 # ============================================================
@@ -1592,10 +1713,48 @@ async def resolve_turnstile_cascade(page, context, playwright_instance, max_glob
     log.info(f"  xdotool: {'SIM' if XDOTOOL_AVAILABLE else 'NÃO'}")
     log.info("=" * 50)
     
+    # V7.1: Receber email para re-preencher após reload
+    email_for_refill = None
+    try:
+        email_for_refill = await page.evaluate("""
+            () => {
+                const input = document.querySelector('input[type="email"], input[name="email"]');
+                return input ? input.value : null;
+            }
+        """)
+    except:
+        pass
+    
     for attempt in range(max_global_attempts):
         log.info(f"\n{'='*40}")
         log.info(f"  TENTATIVA GLOBAL {attempt + 1}/{max_global_attempts}")
         log.info(f"{'='*40}")
+        
+        # V7.1: Diagnóstico antes de tentar
+        turnstile_loaded = await diagnose_turnstile_loading(page, timeout=20)
+        
+        if not turnstile_loaded:
+            log.warning(f"[V7.1] Turnstile NÃO carregou! Tentando recarregar...")
+            if attempt < max_global_attempts - 1:
+                try:
+                    await page.reload(wait_until="networkidle", timeout=30000)
+                except:
+                    try:
+                        await page.reload(wait_until="domcontentloaded", timeout=30000)
+                    except:
+                        pass
+                await asyncio.sleep(5)
+                # Re-preencher email
+                if email_for_refill:
+                    await refill_email_after_reload(page, email_for_refill)
+                # Tentar diagnóstico novamente
+                turnstile_loaded = await diagnose_turnstile_loading(page, timeout=20)
+                if not turnstile_loaded:
+                    log.warning("[V7.1] Turnstile ainda não carregou após reload")
+                    continue
+            else:
+                log.error("[V7.1] Turnstile não carregou em nenhuma tentativa")
+                continue
         
         # Screenshot antes
         try:
@@ -1660,12 +1819,18 @@ async def resolve_turnstile_cascade(page, context, playwright_instance, max_glob
         if attempt < max_global_attempts - 1:
             log.warning(f"Todas as estratégias falharam na tentativa {attempt+1}. Recarregando...")
             try:
-                await page.reload(wait_until="domcontentloaded", timeout=30000)
+                await page.reload(wait_until="networkidle", timeout=30000)
             except:
-                pass
-            await asyncio.sleep(random.uniform(3, 5))
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
+                except:
+                    pass
+            await asyncio.sleep(random.uniform(4, 7))
             
-            # Re-preencher email (será feito pelo chamador)
+            # V7.1: Re-preencher email após reload
+            if email_for_refill:
+                await refill_email_after_reload(page, email_for_refill)
+                await asyncio.sleep(2)
     
     log.error("TODAS AS ESTRATÉGIAS FALHARAM em todas as tentativas!")
     return None
@@ -1683,8 +1848,8 @@ async def main():
     banner = f"""
 {C.CY}{C.BD}
 {'='*60}
-   MANUS ACCOUNT CREATOR V7 - KALI NETHUNTER + KeX
-   TURNSTILE ULTRA BYPASS - Multi-Strategy Engine
+   MANUS ACCOUNT CREATOR V7.1 - KALI NETHUNTER + KeX
+   TURNSTILE ULTRA BYPASS - Multi-Strategy Engine (HOTFIX)
 {'='*60}
    Engine:   {engine}
    Click:    {click_method}
@@ -1703,7 +1868,7 @@ async def main():
     print(banner)
     
     log.info("=" * 60)
-    log.info(f"MANUS ACCOUNT CREATOR V7 INICIADO")
+    log.info(f"MANUS ACCOUNT CREATOR V7.1 INICIADO (HOTFIX)")
     log.info(f"Engine: {engine}")
     log.info(f"Click method: {click_method}")
     log.info(f"xdotool disponível: {XDOTOOL_AVAILABLE}")
@@ -1802,11 +1967,10 @@ async def main():
             '--use-angle=swiftshader',
             '--enable-features=VaapiVideoDecoder',
             '--enable-unsafe-swiftshader',
-            # === Anti-detecção extras V7 ===
-            '--disable-features=IsolateOrigins',
-            '--disable-site-isolation-trials',
-            '--disable-web-security',
-            '--allow-running-insecure-content',
+            # === V7.1: Flags perigosas REMOVIDAS ===
+            # --disable-web-security QUEBRA o Turnstile (Cloudflare rejeita desde Feb 2025)
+            # --disable-site-isolation-trials pode interferir com iframes cross-origin
+            # --allow-running-insecure-content desnecessário e suspeito
         ]
         
         if not USING_PATCHRIGHT:
@@ -1899,11 +2063,16 @@ async def main():
         log.info(f"Navegando: {login_url}")
         
         try:
-            await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+            await page.goto(login_url, wait_until="networkidle", timeout=60000)
         except:
-            log.warning("Timeout ao carregar (normal)")
+            try:
+                await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
+            except:
+                log.warning("Timeout ao carregar (normal para páginas pesadas)")
         
-        await asyncio.sleep(5)
+        # V7.1: Esperar mais para o Turnstile carregar
+        log.info("Aguardando página estabilizar (8s)...")
+        await asyncio.sleep(8)
         
         # Screenshot
         try:
@@ -2385,7 +2554,7 @@ if __name__ == "__main__":
     print(f"{C.CY}[*] xdotool: {'DISPONÍVEL' if XDOTOOL_AVAILABLE else 'NÃO ENCONTRADO'}{C.RS}")
     print(f"{C.CY}[*] DISPLAY={os.environ.get('DISPLAY')}{C.RS}")
     print(f"{C.CY}[*] CAPTCHA API: {'CONFIGURADA' if CAPTCHA_API_KEY else 'NÃO CONFIGURADA (local only)'}{C.RS}")
-    print(f"{C.CY}[*] Iniciando V7...{C.RS}\n")
+    print(f"{C.CY}[*] Iniciando V7.1 (HOTFIX)...{C.RS}\n")
     
     try:
         asyncio.run(main())
