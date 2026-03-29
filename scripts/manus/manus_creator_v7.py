@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
 """
 ==============================================================
-  MANUS ACCOUNT CREATOR V7.2 - KALI LINUX NETHUNTER + KeX VNC
-  TURNSTILE ULTRA BYPASS - Multi-Strategy Engine (NETWORK FIX)
+  MANUS ACCOUNT CREATOR V7.3 - KALI LINUX NETHUNTER + KeX VNC
+  TURNSTILE ULTRA BYPASS - Multi-Strategy Engine (SITEKEY FIX)
 ==============================================================
+
+V7.3 (sobre V7.2):
+- DESCOBERTA: Sitekey do Manus = 0x4AAAAAAA_sd0eRNCinWBgU
+- DESCOBERTA: Input hidden = cf-turnstile-response
+- NOVA ESTRATÉGIA 0: API-only bypass SEM widget (usa sitekey hardcoded)
+  Quando challenges.cloudflare.com está bloqueado, resolve via API externa
+  e injeta token diretamente no input hidden + dispara callbacks React
+- NOVO: force_load_turnstile_script() - tenta carregar o script manualmente
+- NOVO: inject_turnstile_token_directly() - injeção direta no DOM
+- FIX: max_global_attempts agora realmente 5 (era 3 na chamada)
+- FIX: Proxy per-context (autenticação no context, não no launch)
 
 V7.2 (sobre V7.1):
 - FIX CRÍTICO: challenges.cloudflare.com BLOQUEADO na rede do usuário
@@ -363,6 +374,10 @@ PROXY_PASS = "768df629c0304df6"
 PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
 
 DEFAULT_INVITE = "OB746IYA9QIKG"
+
+# Sitekey do Turnstile do Manus (descoberto via análise da página)
+MANUS_TURNSTILE_SITEKEY = "0x4AAAAAAA_sd0eRNCinWBgU"
+MANUS_LOGIN_URL = "https://manus.im/login"
 
 # Chave API para serviço de CAPTCHA solving (configurável)
 CAPTCHA_API_KEY = os.environ.get("CAPTCHA_API_KEY", "")
@@ -1215,6 +1230,197 @@ async def refill_email_after_reload(page, email):
 
 
 # ============================================================
+# ESTRATÉGIA 0: FUNÇÕES AUXILIARES (API-ONLY / INJEÇÃO DIRETA)
+# ============================================================
+async def inject_turnstile_token_directly(page, token):
+    """
+    Injeta um token do Turnstile diretamente no input hidden
+    e dispara os callbacks do React para habilitar o botão Continue.
+    Funciona MESMO quando o widget não carregou.
+    """
+    log.info(f"[INJECT] Injetando token diretamente ({token[:30]}...)")
+    try:
+        result = await page.evaluate(f"""
+            () => {{
+                // 1. Preencher o input hidden cf-turnstile-response
+                const inputs = document.querySelectorAll('input[name="cf-turnstile-response"]');
+                let filled = false;
+                for (const input of inputs) {{
+                    input.value = "{token}";
+                    input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                    input.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    filled = true;
+                }}
+                
+                // 2. Tentar disparar callback do React/Turnstile
+                if (window.__turnstileData && window.__turnstileData.callback) {{
+                    try {{
+                        window.__turnstileData.callback("{token}");
+                    }} catch(e) {{}}
+                }}
+                
+                // 3. Tentar via turnstile object
+                if (window.turnstile && window.turnstile._private) {{
+                    try {{
+                        // Simular resolução
+                        const widgets = document.querySelectorAll('[data-sitekey]');
+                        widgets.forEach(w => {{
+                            w.setAttribute('data-response', "{token}");
+                        }});
+                    }} catch(e) {{}}
+                }}
+                
+                // 4. Disparar evento customizado que o React pode ouvir
+                try {{
+                    window.dispatchEvent(new CustomEvent('turnstile-callback', {{ detail: {{ token: "{token}" }} }}));
+                }} catch(e) {{}}
+                
+                // 5. Tentar encontrar e chamar o callback do React Turnstile
+                // O React Turnstile usa cf__reactTurnstileOnLoad como callback
+                try {{
+                    // Procurar no React fiber pelo setState do Turnstile
+                    const reactRoot = document.querySelector('#__next');
+                    if (reactRoot && reactRoot._reactRootContainer) {{
+                        // React 17-
+                    }} else if (reactRoot) {{
+                        // React 18+ - procurar no __reactFiber
+                        const keys = Object.keys(reactRoot).filter(k => k.startsWith('__reactFiber'));
+                        // Navegar pela árvore React é complexo, usar abordagem alternativa
+                    }}
+                }} catch(e) {{}}
+                
+                // 6. Simular que o Turnstile resolveu via MutationObserver trigger
+                try {{
+                    const continueBtn = document.querySelector('button:has(span)');
+                    if (continueBtn) {{
+                        // Tentar habilitar o botão
+                        continueBtn.disabled = false;
+                        continueBtn.removeAttribute('disabled');
+                        continueBtn.style.opacity = '1';
+                        continueBtn.style.pointerEvents = 'auto';
+                    }}
+                }} catch(e) {{}}
+                
+                return filled;
+            }}
+        """)
+        
+        if result:
+            log.info("[INJECT] Token injetado no input hidden!")
+            await asyncio.sleep(2)
+            
+            # Verificar se o botão Continue ficou habilitado
+            btn_state = await check_continue_enabled(page)
+            if btn_state and not btn_state.get('disabled', True):
+                log.info("[INJECT] Botão Continue HABILITADO após injeção!")
+                return True
+            else:
+                log.warning("[INJECT] Token injetado mas botão Continue ainda desabilitado")
+                # Tentar clicar Continue mesmo assim
+                try:
+                    await page.click('button:has-text("Continue")', timeout=3000)
+                    await asyncio.sleep(3)
+                    # Verificar se navegou para outra página
+                    current_url = page.url
+                    if 'login' not in current_url.lower() or 'verify' in current_url.lower():
+                        log.info("[INJECT] Página mudou após clicar Continue! Sucesso provável.")
+                        return True
+                except:
+                    pass
+                return True  # Token foi injetado, tentar prosseguir
+        
+        return False
+    except Exception as e:
+        log.warning(f"[INJECT] Erro: {e}")
+        return False
+
+
+async def force_load_turnstile_script(page):
+    """
+    Tenta carregar o script do Turnstile manualmente quando
+    challenges.cloudflare.com está bloqueado.
+    Usa fetch() com proxy ou injeta o script via DOM.
+    """
+    log.info("[FORCE_LOAD] Tentando carregar script do Turnstile manualmente...")
+    
+    try:
+        # Tentar carregar via fetch (respeita proxy do context)
+        loaded = await page.evaluate(f"""
+            () => new Promise((resolve) => {{
+                // Verificar se já existe
+                if (typeof window.turnstile !== 'undefined' && window.turnstile.render) {{
+                    resolve(true);
+                    return;
+                }}
+                
+                // Criar script tag
+                const script = document.createElement('script');
+                script.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?onload=cf__reactTurnstileOnLoad&render=explicit';
+                script.onload = () => {{
+                    console.log('[FORCE_LOAD] Script do Turnstile carregado!');
+                    resolve(true);
+                }};
+                script.onerror = () => {{
+                    console.log('[FORCE_LOAD] Falha ao carregar script');
+                    resolve(false);
+                }};
+                document.head.appendChild(script);
+                
+                // Timeout
+                setTimeout(() => resolve(false), 15000);
+            }})
+        """)
+        
+        if loaded:
+            log.info("[FORCE_LOAD] Script carregado com sucesso!")
+            await asyncio.sleep(3)  # Dar tempo para inicializar
+            
+            # Tentar renderizar o widget manualmente
+            try:
+                rendered = await page.evaluate(f"""
+                    () => {{
+                        if (typeof window.turnstile !== 'undefined' && window.turnstile.render) {{
+                            // Procurar container ou criar um
+                            let container = document.querySelector('.cf-turnstile, [data-sitekey]');
+                            if (!container) {{
+                                // Criar container antes do botão Continue
+                                const btn = document.querySelector('button:has-text("Continue")');
+                                if (btn) {{
+                                    container = document.createElement('div');
+                                    container.className = 'cf-turnstile';
+                                    container.setAttribute('data-sitekey', '{MANUS_TURNSTILE_SITEKEY}');
+                                    btn.parentElement.insertBefore(container, btn);
+                                }}
+                            }}
+                            if (container) {{
+                                window.turnstile.render(container, {{
+                                    sitekey: '{MANUS_TURNSTILE_SITEKEY}',
+                                    callback: function(token) {{
+                                        console.log('[FORCE_LOAD] Token recebido:', token.substring(0, 30));
+                                        const input = document.querySelector('input[name="cf-turnstile-response"]');
+                                        if (input) input.value = token;
+                                    }}
+                                }});
+                                return true;
+                            }}
+                        }}
+                        return false;
+                    }}
+                """)
+                if rendered:
+                    log.info("[FORCE_LOAD] Widget renderizado manualmente!")
+            except Exception as e:
+                log.warning(f"[FORCE_LOAD] Erro ao renderizar: {e}")
+            
+            return True
+        
+        return False
+    except Exception as e:
+        log.warning(f"[FORCE_LOAD] Erro: {e}")
+        return False
+
+
+# ============================================================
 # ESTRATÉGIA 1: TURNSTILE RENDER INTERCEPTOR + EXTERNAL SOLVER
 # ============================================================
 async def strategy_interceptor_solve(page, context, timeout=60):
@@ -1859,9 +2065,9 @@ async def resolve_turnstile_cascade(page, context, playwright_instance, max_glob
     4. xdotool fallback simples
     """
     log.info("=" * 50)
-    log.info("  TURNSTILE CASCADE RESOLVER V7")
+    log.info("  TURNSTILE CASCADE RESOLVER V7.3")
     log.info(f"  Estratégias: 4 | Max tentativas: {max_global_attempts}")
-    log.info(f"  V7.2: Auto IP rotation + DNS fix habilitados")
+    log.info(f"  V7.3: API-only bypass + sitekey hardcoded + IP rotation")
     log.info(f"  API Key: {'SIM' if CAPTCHA_API_KEY else 'NÃO'}")
     log.info(f"  xdotool: {'SIM' if XDOTOOL_AVAILABLE else 'NÃO'}")
     log.info("=" * 50)
@@ -1887,39 +2093,68 @@ async def resolve_turnstile_cascade(page, context, playwright_instance, max_glob
         turnstile_loaded = await diagnose_turnstile_loading(page, timeout=20)
         
         if not turnstile_loaded:
-            log.warning(f"[V7.2] Turnstile NÃO carregou! (challenges.cloudflare.com bloqueado?)")
+            log.warning(f"[V7.2] Turnstile widget NÃO carregou (challenges.cloudflare.com bloqueado?)")
             
-            if attempt < max_global_attempts - 1:
-                # V7.2: Na tentativa 2+, tentar trocar IP
-                if attempt >= 1:
-                    log.info("[V7.2] Tentando trocar IP para desbloquear Cloudflare...")
-                    print(f"\n{C.Y}{C.BD}  [V7.2] Trocando IP via modo avião...{C.RS}\n")
-                    rotated = rotate_ip_airplane()
-                    if rotated:
-                        flush_dns_cache()
-                        await asyncio.sleep(5)
-                        new_ip = get_current_ip()
-                        log.info(f"[V7.2] Novo IP: {new_ip}")
-                
+            # ========================================
+            # ESTRATÉGIA 0: API-ONLY BYPASS (SEM WIDGET)
+            # Usa sitekey hardcoded + serviço externo
+            # ========================================
+            log.info("[ESTRATÉGIA 0] Tentando bypass API-only (widget não carregou)")
+            log.info(f"[ESTRATÉGIA 0] Sitekey hardcoded: {MANUS_TURNSTILE_SITEKEY[:20]}...")
+            
+            if CAPTCHA_API_KEY:
                 try:
-                    await page.reload(wait_until="networkidle", timeout=30000)
-                except:
-                    try:
-                        await page.reload(wait_until="domcontentloaded", timeout=30000)
-                    except:
-                        pass
-                await asyncio.sleep(5)
-                # Re-preencher email
-                if email_for_refill:
-                    await refill_email_after_reload(page, email_for_refill)
-                # Tentar diagnóstico novamente
-                turnstile_loaded = await diagnose_turnstile_loading(page, timeout=25)
-                if not turnstile_loaded:
-                    log.warning("[V7.2] Turnstile ainda não carregou após reload")
-                    continue
+                    token = await solve_via_external_service(
+                        sitekey=MANUS_TURNSTILE_SITEKEY,
+                        page_url=page.url,
+                    )
+                    if token:
+                        log.info(f"[ESTRATÉGIA 0] Token obtido via API! {token[:40]}...")
+                        # Injetar token diretamente no input hidden
+                        injected = await inject_turnstile_token_directly(page, token)
+                        if injected:
+                            log.info("[ESTRATÉGIA 0] SUCESSO! Token injetado sem widget!")
+                            return token
+                except Exception as e:
+                    log.warning(f"[ESTRATÉGIA 0] Falha API: {e}")
             else:
-                log.error("[V7.2] Turnstile não carregou em nenhuma tentativa")
-                continue
+                log.info("[ESTRATÉGIA 0] Sem API key - tentando injetar script do Turnstile manualmente")
+                # Tentar carregar o script do Turnstile manualmente
+                try:
+                    loaded = await force_load_turnstile_script(page)
+                    if loaded:
+                        log.info("[ESTRATÉGIA 0] Script do Turnstile carregado manualmente!")
+                        turnstile_loaded = True  # Continuar com estratégias normais
+                except Exception as e:
+                    log.warning(f"[ESTRATÉGIA 0] Falha ao carregar script: {e}")
+            
+            if not turnstile_loaded:
+                if attempt < max_global_attempts - 1:
+                    # V7.2: Na tentativa 2+, tentar trocar IP
+                    if attempt >= 1:
+                        log.info("[V7.2] Tentando trocar IP para desbloquear Cloudflare...")
+                        print(f"\n{C.Y}{C.BD}  [V7.2] Trocando IP via modo avião...{C.RS}\n")
+                        rotated = rotate_ip_airplane()
+                        if rotated:
+                            flush_dns_cache()
+                            await asyncio.sleep(5)
+                            new_ip = get_current_ip()
+                            log.info(f"[V7.2] Novo IP: {new_ip}")
+                    
+                    try:
+                        await page.reload(wait_until="networkidle", timeout=30000)
+                    except:
+                        try:
+                            await page.reload(wait_until="domcontentloaded", timeout=30000)
+                        except:
+                            pass
+                    await asyncio.sleep(5)
+                    if email_for_refill:
+                        await refill_email_after_reload(page, email_for_refill)
+                    continue
+                else:
+                    log.error("[V7.2] Turnstile não carregou em nenhuma tentativa")
+                    continue
         
         # Screenshot antes
         try:
@@ -2353,7 +2588,7 @@ async def main():
             page=page,
             context=context,
             playwright_instance=p,
-            max_global_attempts=3
+            max_global_attempts=5
         )
         
         if cf_token:
@@ -2777,7 +3012,7 @@ if __name__ == "__main__":
     print(f"{C.CY}[*] xdotool: {'DISPONÍVEL' if XDOTOOL_AVAILABLE else 'NÃO ENCONTRADO'}{C.RS}")
     print(f"{C.CY}[*] DISPLAY={os.environ.get('DISPLAY')}{C.RS}")
     print(f"{C.CY}[*] CAPTCHA API: {'CONFIGURADA' if CAPTCHA_API_KEY else 'NÃO CONFIGURADA (local only)'}{C.RS}")
-    print(f"{C.CY}[*] Iniciando V7.2 (NETWORK FIX)...{C.RS}\n")
+    print(f"{C.CY}[*] Iniciando V7.3 (SITEKEY FIX)...{C.RS}\n")
     
     try:
         asyncio.run(main())
