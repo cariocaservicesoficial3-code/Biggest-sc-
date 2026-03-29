@@ -1,17 +1,20 @@
 #!/usr/bin/env python3
 """
 ==============================================================
-  MANUS ACCOUNT CREATOR V5 - KALI LINUX NETHUNTER + KeX VNC
-  Patchright + xdotool REAL CLICK Turnstile Bypass + Logging
+  MANUS ACCOUNT CREATOR V6 - KALI LINUX NETHUNTER + KeX VNC
+  Patchright + xdotool + WebGL Fix - Turnstile Bypass + Logging
 ==============================================================
 
-Mudanças V5:
+Mudanças V6:
+- FIX CRÍTICO: WebGL "Software only" fazia Turnstile SEMPRE falhar (mesmo manual!)
+  Cloudflare verifica WebGL status - sem GPU (VNC/KeX) = sempre rejeita
+  Adicionado --ignore-gpu-blocklist + --enable-gpu + --use-gl=angle
+- FIX: Spoof WebGL renderer para parecer GPU real (NVIDIA GeForce GTX 1080)
 - FIX: Removido --sync do xdotool (causava timeout no VNC/KeX)
-- FIX: check_continue_enabled agora ignora botões sociais (Facebook/Google/etc)
+- FIX: check_continue_enabled ignora botões sociais (Facebook/Google/etc)
 - FIX: Seletor do botão Continue mais preciso
-- FIX: Coordenadas do Turnstile agora usam bounding_box direto (sem window offset)
-- xdotool para cliques REAIS no Turnstile (bypass screenX/screenY)
-- Patchright (indetectável) + xdotool = combo perfeito
+- FIX: Coordenadas do Turnstile usam xdotool getwindowgeometry
+- Patchright (indetectável) + xdotool + WebGL fix = combo completo
 - Logs completos em /sdcard/nh_files/MANUS LOGS/
 - ZIP único acumulativo MANUS_LOGS.zip
 - Screenshots automáticos de cada etapa
@@ -743,7 +746,7 @@ async def main():
     banner = f"""
 {C.CY}{C.BD}
 {'='*60}
-   MANUS ACCOUNT CREATOR V5 - KALI NETHUNTER + KeX
+   MANUS ACCOUNT CREATOR V6 - KALI NETHUNTER + KeX
    {engine}
    Turnstile: {click_method}
 {'='*60}
@@ -758,7 +761,7 @@ async def main():
     print(banner)
     
     log.info("=" * 60)
-    log.info(f"MANUS ACCOUNT CREATOR V5 INICIADO")
+    log.info(f"MANUS ACCOUNT CREATOR V6 INICIADO")
     log.info(f"Engine: {engine}")
     log.info(f"Click method: {click_method}")
     log.info(f"xdotool disponível: {XDOTOOL_AVAILABLE}")
@@ -840,6 +843,18 @@ async def main():
             '--disable-dev-shm-usage',
             '--window-size=1280,720',
             '--window-position=0,0',
+            # === FIX CRÍTICO: WebGL/GPU para Turnstile funcionar no VNC ===
+            # Sem isso, WebGL reporta "Software only" e Turnstile SEMPRE falha
+            # (mesmo com clique manual!)
+            '--ignore-gpu-blocklist',
+            '--enable-gpu',
+            '--enable-gpu-rasterization',
+            '--enable-webgl',
+            '--use-gl=angle',
+            '--use-angle=swiftshader',
+            '--enable-features=VaapiVideoDecoder',
+            # Forçar aceleração mesmo sem GPU real
+            '--enable-unsafe-swiftshader',
         ]
         
         if not USING_PATCHRIGHT:
@@ -865,6 +880,47 @@ async def main():
             viewport={'width': 1200, 'height': 680},
             locale='en-US',
         )
+        
+        # === SPOOF WebGL Renderer para parecer GPU real ===
+        # Cloudflare verifica o WebGL renderer. No VNC sem GPU, aparece
+        # "Google SwiftShader" que está numa lista de renderers suspeitos.
+        # Spoofamos para parecer uma GPU real.
+        await context.add_init_script("""
+            // Spoof WebGL renderer e vendor
+            const getParameterOrig = WebGLRenderingContext.prototype.getParameter;
+            WebGLRenderingContext.prototype.getParameter = function(param) {
+                // UNMASKED_VENDOR_WEBGL
+                if (param === 0x9245) return 'NVIDIA Corporation';
+                // UNMASKED_RENDERER_WEBGL
+                if (param === 0x9246) return 'NVIDIA GeForce GTX 1080 Ti/PCIe/SSE2';
+                return getParameterOrig.call(this, param);
+            };
+            
+            // Também para WebGL2
+            if (typeof WebGL2RenderingContext !== 'undefined') {
+                const getParameter2Orig = WebGL2RenderingContext.prototype.getParameter;
+                WebGL2RenderingContext.prototype.getParameter = function(param) {
+                    if (param === 0x9245) return 'NVIDIA Corporation';
+                    if (param === 0x9246) return 'NVIDIA GeForce GTX 1080 Ti/PCIe/SSE2';
+                    return getParameter2Orig.call(this, param);
+                };
+            }
+            
+            // Spoof WebGPU adapter info
+            if (navigator.gpu) {
+                const origRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+                navigator.gpu.requestAdapter = async function(options) {
+                    const adapter = await origRequestAdapter(options);
+                    if (adapter) {
+                        const origInfo = adapter.requestAdapterInfo.bind(adapter);
+                        adapter.requestAdapterInfo = async function() {
+                            return { vendor: 'nvidia', architecture: 'ampere', device: '', description: '' };
+                        };
+                    }
+                    return adapter;
+                };
+            }
+        """)
         
         if not USING_PATCHRIGHT:
             await context.add_init_script("""
@@ -1533,7 +1589,7 @@ if __name__ == "__main__":
     print(f"{C.CY}[*] Engine: {'PATCHRIGHT' if USING_PATCHRIGHT else 'PLAYWRIGHT'}{C.RS}")
     print(f"{C.CY}[*] xdotool: {'DISPONÍVEL' if XDOTOOL_AVAILABLE else 'NÃO ENCONTRADO'}{C.RS}")
     print(f"{C.CY}[*] DISPLAY={os.environ.get('DISPLAY')}{C.RS}")
-    print(f"{C.CY}[*] Iniciando V5...{C.RS}\n")
+    print(f"{C.CY}[*] Iniciando V6...{C.RS}\n")
     
     try:
         asyncio.run(main())
