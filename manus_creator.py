@@ -44,6 +44,7 @@ import string
 import sys
 import time
 import traceback
+import zipfile
 from datetime import datetime
 from urllib.parse import unquote
 
@@ -1082,7 +1083,66 @@ async def main():
         with open(responses_file, 'w', encoding='utf-8') as f:
             json.dump(captured_data['all_responses'], f, indent=2, ensure_ascii=False)
         
+        log.info("=" * 60)
+        log.info(f"FINALIZADO em {elapsed_total}s | Status: {status}")
+        log.info(f"Respostas API capturadas: {len(captured_data['all_responses'])}")
+        log.info("=" * 60)
+        
+        # ========================================
+        # COMPACTAR TODOS OS LOGS EM ZIP
+        # ========================================
+        log_separator("COMPACTANDO LOGS EM ZIP")
+        
+        # Fechar handlers de log antes de zipar
+        for handler in log.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+        for handler in http_log.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+        for handler in browser_log.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+        
+        zip_name = f"{timestamp}_manus_logs_{status}.zip"
+        zip_path = os.path.join(LOG_DIR, zip_name)
+        
+        log_files_to_zip = [
+            main_log_file,
+            http_log_file,
+            browser_log_file,
+            error_log_file,
+            creds_file,
+            tokens_file,
+            responses_file,
+        ]
+        
+        # Adicionar screenshots
+        for f_name in os.listdir(LOG_DIR):
+            full = os.path.join(LOG_DIR, f_name)
+            if f_name.startswith(timestamp) and f_name.endswith('.png'):
+                if full not in log_files_to_zip:
+                    log_files_to_zip.append(full)
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for lf in log_files_to_zip:
+                    if os.path.exists(lf):
+                        zf.write(lf, os.path.basename(lf))
+            
+            zip_size = os.path.getsize(zip_path)
+            zip_size_kb = zip_size / 1024
+            
+            print(f"\n{C.G}{C.BD}  [ZIP] Logs compactados com sucesso!{C.RS}")
+            print(f"  {C.G}  Arquivo: {zip_path}{C.RS}")
+            print(f"  {C.G}  Tamanho: {zip_size_kb:.1f} KB{C.RS}")
+            print(f"  {C.G}  Arquivos: {len([f for f in log_files_to_zip if os.path.exists(f)])}{C.RS}")
+        except Exception as e:
+            print(f"\n{C.R}  [ERRO] Falha ao criar ZIP: {e}{C.RS}")
+        
+        # Listar todos os logs
         print(f"\n{C.CY}{C.BD}  LOGS GERADOS:{C.RS}")
+        print(f"  {C.CY}  ZIP:         {zip_path}{C.RS}")
         print(f"  {C.CY}  Principal:   {main_log_file}{C.RS}")
         print(f"  {C.CY}  HTTP:        {http_log_file}{C.RS}")
         print(f"  {C.CY}  Browser:     {browser_log_file}{C.RS}")
@@ -1091,11 +1151,6 @@ async def main():
         print(f"  {C.CY}  Tokens:      {tokens_file}{C.RS}")
         print(f"  {C.CY}  API Dump:    {responses_file}{C.RS}")
         print()
-        
-        log.info("=" * 60)
-        log.info(f"FINALIZADO em {elapsed_total}s | Status: {status}")
-        log.info(f"Respostas API capturadas: {len(captured_data['all_responses'])}")
-        log.info("=" * 60)
         
         print(f"{C.Y}[*] Browser aberto no KeX. ENTER para fechar.{C.RS}")
         input()
