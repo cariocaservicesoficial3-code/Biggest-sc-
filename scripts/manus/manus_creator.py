@@ -1,24 +1,39 @@
 #!/usr/bin/env python3
 """
 ==============================================================
-  MANUS ACCOUNT CREATOR - KALI LINUX NETHUNTER
-  Emailnator + Playwright + Cloudflare Turnstile (Semi-Auto)
+  MANUS ACCOUNT CREATOR V4 - KALI LINUX NETHUNTER + KeX VNC
+  Patchright + xdotool REAL CLICK Turnstile Bypass + Logging
 ==============================================================
+
+Mudanças V4:
+- xdotool para cliques REAIS no Turnstile (bypass screenX/screenY)
+- Cloudflare detecta cliques CDP porque screenX/screenY ficam
+  relativos ao iframe (<100). xdotool gera cliques no nível do OS,
+  com coordenadas corretas (>100).
+- Patchright (indetectável) + xdotool = combo perfeito
+- Logs completos em /sdcard/nh_files/MANUS LOGS/
+- ZIP único acumulativo MANUS_LOGS.zip
+- Screenshots automáticos de cada etapa
 
 Fluxo:
 1. Pede o link de convite do Manus
 2. Gera Gmail temporário via Emailnator (dotGmail)
 3. Gera senha forte no padrão aceito pelo Manus
-4. Abre Playwright (headless=False) para resolver Turnstile
-5. Faz o registro via API do Manus
-6. Monitora Emailnator para capturar código de 6 dígitos
-7. Envia o código de verificação
-8. Seleciona Polônia na página de telefone
-9. Salva logs e credenciais
+4. Abre Patchright (headless=False) no display VNC
+5. Navega para manus.im/login
+6. Preenche email
+7. Localiza iframe do Turnstile e clica com xdotool (REAL CLICK)
+8. Clica Continue
+9. Monitora Emailnator para capturar código de 6 dígitos
+10. Envia o código de verificação
+11. Completa registro via API
+12. Seleciona Polônia na página de telefone
+13. Salva logs e credenciais
 
 Requisitos:
-  pip3 install requests playwright rich
-  playwright install chromium
+  pip3 install patchright requests rich --break-system-packages
+  python3 -m patchright install chromium
+  apt install xdotool  (para cliques reais no Turnstile)
 """
 
 import asyncio
@@ -27,49 +42,124 @@ import logging
 import os
 import random
 import re
+import shutil
 import string
+import subprocess
 import sys
 import time
+import traceback
+import zipfile
 from datetime import datetime
-from urllib.parse import unquote, urlparse, parse_qs
+from urllib.parse import unquote
+
+# ============================================================
+# FIX CRÍTICO: SETAR DISPLAY PARA VNC/KeX
+# ============================================================
+os.environ['DISPLAY'] = ':1'
+
+# ============================================================
+# DETECTAR PATCHRIGHT OU PLAYWRIGHT
+# ============================================================
+USING_PATCHRIGHT = False
+try:
+    from patchright.async_api import async_playwright
+    USING_PATCHRIGHT = True
+except ImportError:
+    try:
+        from playwright.async_api import async_playwright
+        USING_PATCHRIGHT = False
+    except ImportError:
+        print("\033[91m[ERRO] Nem patchright nem playwright estão instalados!\033[0m")
+        print("\033[93mInstale com: pip3 install patchright --break-system-packages\033[0m")
+        print("\033[93m             python3 -m patchright install chromium\033[0m")
+        sys.exit(1)
+
+# ============================================================
+# VERIFICAR XDOTOOL
+# ============================================================
+XDOTOOL_AVAILABLE = shutil.which('xdotool') is not None
 
 # ============================================================
 # CORES PARA O TERMINAL
 # ============================================================
 class C:
-    R = '\033[91m'    # Red
-    G = '\033[92m'    # Green
-    Y = '\033[93m'    # Yellow
-    B = '\033[94m'    # Blue
-    M = '\033[95m'    # Magenta
-    CY = '\033[96m'   # Cyan
-    W = '\033[97m'    # White
-    BD = '\033[1m'    # Bold
-    RS = '\033[0m'    # Reset
+    R = '\033[91m'
+    G = '\033[92m'
+    Y = '\033[93m'
+    B = '\033[94m'
+    M = '\033[95m'
+    CY = '\033[96m'
+    W = '\033[97m'
+    BD = '\033[1m'
+    RS = '\033[0m'
 
 # ============================================================
-# CONFIGURAÇÃO DE LOGS
+# CONFIGURAÇÃO DE LOGS - /sdcard/nh_files/MANUS LOGS/
 # ============================================================
-log_filename = datetime.now().strftime('%Y-%m-%d_%H%M%S') + "_manus_creator.log"
-log_path = os.path.join(os.path.expanduser("~"), log_filename)
+LOG_DIR = "/sdcard/nh_files/MANUS LOGS"
+os.makedirs(LOG_DIR, exist_ok=True)
 
-file_handler = logging.FileHandler(log_path)
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
 
-stream_handler = logging.StreamHandler(sys.stdout)
-stream_handler.setLevel(logging.DEBUG)
+# Arquivos de log
+main_log_file = os.path.join(LOG_DIR, f"{timestamp}_manus_creator.log")
+http_log_file = os.path.join(LOG_DIR, f"{timestamp}_manus_http.log")
+browser_log_file = os.path.join(LOG_DIR, f"{timestamp}_manus_browser.log")
+creds_file = os.path.join(LOG_DIR, "manus_credentials.log")
+tokens_file = os.path.join(LOG_DIR, "manus_tokens.log")
+error_log_file = os.path.join(LOG_DIR, f"{timestamp}_manus_errors.log")
 
 class ColorFmt(logging.Formatter):
-    COLORS = {'DEBUG': C.CY, 'INFO': C.G, 'WARNING': C.Y, 'ERROR': C.R}
+    COLORS = {'DEBUG': C.CY, 'INFO': C.G, 'WARNING': C.Y, 'ERROR': C.R, 'CRITICAL': C.R}
     def format(self, record):
         c = self.COLORS.get(record.levelname, C.W)
         record.msg = f"{c}{record.msg}{C.RS}"
         return super().format(record)
 
-stream_handler.setFormatter(ColorFmt('%(asctime)s [%(levelname)s] %(message)s'))
-logging.basicConfig(level=logging.DEBUG, handlers=[file_handler, stream_handler])
+# Logger principal
 log = logging.getLogger("MANUS")
+log.setLevel(logging.DEBUG)
+
+fh_main = logging.FileHandler(main_log_file, encoding='utf-8')
+fh_main.setLevel(logging.DEBUG)
+fh_main.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s'))
+log.addHandler(fh_main)
+
+fh_error = logging.FileHandler(error_log_file, encoding='utf-8')
+fh_error.setLevel(logging.ERROR)
+fh_error.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] [%(name)s] %(message)s\n%(pathname)s:%(lineno)d'))
+log.addHandler(fh_error)
+
+sh = logging.StreamHandler(sys.stdout)
+sh.setLevel(logging.DEBUG)
+sh.setFormatter(ColorFmt('%(asctime)s [%(levelname)s] %(message)s'))
+log.addHandler(sh)
+
+# Logger HTTP
+http_log = logging.getLogger("HTTP")
+http_log.setLevel(logging.DEBUG)
+fh_http = logging.FileHandler(http_log_file, encoding='utf-8')
+fh_http.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+http_log.addHandler(fh_http)
+http_log.addHandler(fh_main)
+
+# Logger Browser
+browser_log = logging.getLogger("BROWSER")
+browser_log.setLevel(logging.DEBUG)
+fh_browser = logging.FileHandler(browser_log_file, encoding='utf-8')
+fh_browser.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(message)s'))
+browser_log.addHandler(fh_browser)
+browser_log.addHandler(fh_main)
+
+def log_separator(title):
+    sep = "=" * 60
+    log.info(sep)
+    log.info(f"  {title}")
+    log.info(sep)
+
+def log_to_file(filepath, content):
+    with open(filepath, 'a', encoding='utf-8') as f:
+        f.write(f"[{datetime.now().isoformat()}] {content}\n")
 
 # ============================================================
 # CONFIGURAÇÕES
@@ -78,19 +168,18 @@ MANUS_API = "https://api.manus.im"
 EMAILNATOR_URL = "https://www.emailnator.com"
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36"
 
-# Proxy (mesmo do 2NR)
 PROXY_HOST = "74.81.81.81"
 PROXY_PORT = "823"
 PROXY_USER = "be2c872545392337df6e__cr.br"
 PROXY_PASS = "768df629c0304df6"
 PROXY_URL = f"http://{PROXY_USER}:{PROXY_PASS}@{PROXY_HOST}:{PROXY_PORT}"
 
+DEFAULT_INVITE = "OB746IYA9QIKG"
+
 # ============================================================
 # EMAILNATOR CLIENT
 # ============================================================
 class Emailnator:
-    """Cliente para gerar Gmail temporário e monitorar caixa de entrada via Emailnator"""
-    
     def __init__(self):
         import requests
         self.session = requests.Session()
@@ -100,24 +189,25 @@ class Emailnator:
         })
         self.xsrf_token = None
         self.email = None
+        log.debug("Emailnator client inicializado")
     
     def _get_xsrf(self):
-        """Extrai o token XSRF do cookie"""
         try:
+            http_log.info(f"GET {EMAILNATOR_URL} (obtendo XSRF token)")
             resp = self.session.get(EMAILNATOR_URL, timeout=15)
+            http_log.info(f"  Status: {resp.status_code}")
             for cookie in resp.cookies:
                 if cookie.name == 'XSRF-TOKEN':
                     self.xsrf_token = unquote(cookie.value)
-                    log.debug(f"XSRF-TOKEN obtido: {self.xsrf_token[:30]}...")
+                    http_log.info(f"  XSRF-TOKEN obtido: {self.xsrf_token[:40]}...")
                     return True
-            log.warning("XSRF-TOKEN não encontrado nos cookies")
+            http_log.warning("  XSRF-TOKEN não encontrado")
             return False
         except Exception as e:
-            log.error(f"Erro ao obter XSRF: {e}")
+            http_log.error(f"  Erro XSRF: {e}")
             return False
     
     def _headers(self):
-        """Headers padrão para requisições ao Emailnator"""
         return {
             'Content-Type': 'application/json',
             'Origin': EMAILNATOR_URL,
@@ -128,20 +218,19 @@ class Emailnator:
         }
     
     def generate_email(self):
-        """Gera um Gmail temporário com pontos aleatórios (dotGmail)"""
         if not self._get_xsrf():
             return None
-        
         try:
+            payload = {"email": ["dotGmail"]}
+            http_log.info(f"POST {EMAILNATOR_URL}/generate-email")
             resp = self.session.post(
                 f"{EMAILNATOR_URL}/generate-email",
                 headers=self._headers(),
-                json={"email": ["dotGmail"]},
+                json=payload,
                 timeout=15
             )
-            
-            log.debug(f"Generate email status: {resp.status_code}")
-            log.debug(f"Generate email response: {resp.text[:300]}")
+            http_log.info(f"  Status: {resp.status_code}")
+            http_log.debug(f"  Response: {resp.text[:500]}")
             
             if resp.status_code == 200:
                 result = resp.json()
@@ -150,21 +239,17 @@ class Emailnator:
                     self.email = emails[0] if isinstance(emails, list) else emails
                 elif isinstance(result, list):
                     self.email = result[0]
-                
                 if self.email:
                     log.info(f"Gmail gerado: {self.email}")
                     return self.email
-            
             return None
         except Exception as e:
             log.error(f"Erro ao gerar email: {e}")
             return None
     
     def get_inbox(self):
-        """Verifica a caixa de entrada"""
         if not self.email:
             return None
-        
         try:
             resp = self.session.post(
                 f"{EMAILNATOR_URL}/message-list",
@@ -172,10 +257,7 @@ class Emailnator:
                 json={"email": self.email},
                 timeout=15
             )
-            
-            # Se token expirou, renovar
             if resp.status_code == 419:
-                log.debug("Token expirado (419), renovando...")
                 self._get_xsrf()
                 resp = self.session.post(
                     f"{EMAILNATOR_URL}/message-list",
@@ -183,16 +265,14 @@ class Emailnator:
                     json={"email": self.email},
                     timeout=15
                 )
-            
             if resp.status_code == 200:
                 return resp.json()
             return None
         except Exception as e:
-            log.error(f"Erro ao verificar inbox: {e}")
+            http_log.error(f"  Erro inbox: {e}")
             return None
     
     def get_message(self, message_id):
-        """Lê o conteúdo de uma mensagem específica"""
         try:
             resp = self.session.post(
                 f"{EMAILNATOR_URL}/message-list",
@@ -204,15 +284,11 @@ class Emailnator:
                 return resp.text
             return None
         except Exception as e:
-            log.error(f"Erro ao ler mensagem: {e}")
+            http_log.error(f"  Erro msg: {e}")
             return None
     
     def wait_for_code(self, sender_filter="manus", max_wait=180):
-        """Monitora a caixa de entrada esperando um código de 6 dígitos"""
-        log.info(f"Monitorando caixa de entrada: {self.email}")
-        log.info(f"Filtro de remetente: {sender_filter}")
-        log.info(f"Tempo máximo: {max_wait}s")
-        
+        log.info(f"Monitorando inbox: {self.email} | Filtro: {sender_filter} | Timeout: {max_wait}s")
         start = time.time()
         processed = set()
         attempt = 0
@@ -220,56 +296,44 @@ class Emailnator:
         while time.time() - start < max_wait:
             attempt += 1
             elapsed = int(time.time() - start)
-            log.info(f"Verificação #{attempt} ({elapsed}s/{max_wait}s)...")
+            
+            if attempt % 5 == 0:
+                log.info(f"  Inbox check #{attempt} ({elapsed}s/{max_wait}s)")
             
             inbox = self.get_inbox()
-            if inbox and 'messageData' in inbox:
-                messages = inbox['messageData']
-                log.debug(f"Mensagens na caixa: {len(messages)}")
+            if inbox and isinstance(inbox, dict):
+                messages = inbox.get('messageData', [])
+                if isinstance(inbox, list):
+                    messages = inbox
                 
                 for msg in messages:
-                    msg_id = msg.get('messageID')
-                    sender = msg.get('from', '').lower()
-                    subject = msg.get('subject', '')
+                    msg_from = msg.get('from', '') if isinstance(msg, dict) else ''
+                    msg_subject = msg.get('subject', '') if isinstance(msg, dict) else ''
+                    msg_id = msg.get('messageID', '') if isinstance(msg, dict) else ''
                     
-                    if msg_id and msg_id not in processed:
-                        log.debug(f"  Nova msg - De: {sender} | Assunto: {subject}")
+                    if not msg_id or msg_id in processed:
+                        continue
+                    
+                    if sender_filter.lower() in msg_from.lower() or sender_filter.lower() in msg_subject.lower():
+                        log.info(f"  E-mail encontrado! De: {msg_from} | Assunto: {msg_subject}")
                         
-                        if sender_filter.lower() in sender or sender_filter.lower() in subject.lower():
-                            processed.add(msg_id)
-                            log.info(f"E-MAIL DO MANUS DETECTADO! De: {sender}")
-                            
-                            content = self.get_message(msg_id)
-                            if content:
-                                log.debug(f"Conteúdo (primeiros 500): {content[:500]}")
-                                
-                                # Extrair código de 6 dígitos
-                                codes = re.findall(r'\b(\d{6})\b', content)
-                                if codes:
-                                    code = codes[0]
-                                    log.info(f"CÓDIGO DE VERIFICAÇÃO ENCONTRADO: {code}")
-                                    return code
-                                else:
-                                    log.warning("Mensagem do Manus sem código de 6 dígitos")
-                        
-                        processed.add(msg_id)
-            
+                        body = self.get_message(msg_id)
+                        if body:
+                            codes = re.findall(r'\b(\d{6})\b', body)
+                            if codes:
+                                log.info(f"  >>> CÓDIGO: {codes[0]}")
+                                return codes[0]
+                    processed.add(msg_id)
             time.sleep(5)
         
-        log.error(f"TIMEOUT: Nenhum código recebido em {max_wait}s")
+        log.error(f"TIMEOUT: Nenhum código em {max_wait}s")
         return None
 
 # ============================================================
-# GERADOR DE SENHA NO PADRÃO DO MANUS
+# GERADOR DE SENHA
 # ============================================================
 def generate_manus_password(length=20):
-    """
-    Gera senha no padrão aceito pelo Manus.
-    Exemplo: OEBm0F4NL:Ja7'9r;#8P
-    Inclui: maiúsculas, minúsculas, números, especiais variados
-    """
     specials = ":;'#@!$%^&*()-_+=<>?"
-    
     parts = [
         random.choice(string.ascii_uppercase),
         random.choice(string.ascii_uppercase),
@@ -281,44 +345,387 @@ def generate_manus_password(length=20):
         random.choice(specials),
         random.choice(specials),
     ]
-    
     remaining = length - len(parts)
     all_chars = string.ascii_letters + string.digits + specials
     parts.extend(random.choices(all_chars, k=remaining))
-    
     random.shuffle(parts)
     password = ''.join(parts)
-    
-    log.debug(f"Senha gerada: {password}")
+    log.debug(f"Senha gerada ({length} chars): {password}")
     return password
 
 # ============================================================
-# FLUXO PRINCIPAL COM PLAYWRIGHT
+# XDOTOOL REAL CLICK - Bypass Turnstile screenX/screenY check
+# ============================================================
+def xdotool_click(x, y):
+    """
+    Executa um clique REAL no nível do sistema operacional usando xdotool.
+    Isso gera um MouseEvent com screenX/screenY corretos (relativos à tela),
+    não ao iframe. O Cloudflare Turnstile verifica se screenX/screenY > 100
+    para detectar cliques automatizados via CDP.
+    """
+    try:
+        # Mover o mouse suavemente para a posição
+        subprocess.run(
+            ['xdotool', 'mousemove', '--sync', str(int(x)), str(int(y))],
+            timeout=5, capture_output=True
+        )
+        time.sleep(0.1 + random.uniform(0.05, 0.15))
+        
+        # Clicar
+        subprocess.run(
+            ['xdotool', 'click', '1'],
+            timeout=5, capture_output=True
+        )
+        browser_log.info(f"xdotool REAL CLICK em ({int(x)}, {int(y)})")
+        return True
+    except Exception as e:
+        browser_log.error(f"xdotool falhou: {e}")
+        return False
+
+def xdotool_human_click(x, y):
+    """
+    Clique com movimento humano - move em steps para parecer natural.
+    """
+    try:
+        # Primeiro, pegar posição atual do mouse
+        result = subprocess.run(
+            ['xdotool', 'getmouselocation'],
+            timeout=5, capture_output=True, text=True
+        )
+        current_x, current_y = 0, 0
+        if result.stdout:
+            parts = result.stdout.strip().split()
+            for p in parts:
+                if p.startswith('x:'):
+                    current_x = int(p.split(':')[1])
+                elif p.startswith('y:'):
+                    current_y = int(p.split(':')[1])
+        
+        # Mover em steps para parecer humano
+        steps = random.randint(5, 12)
+        for i in range(steps):
+            progress = (i + 1) / steps
+            # Adicionar um pouco de curva/jitter
+            jitter_x = random.uniform(-3, 3) if i < steps - 1 else 0
+            jitter_y = random.uniform(-2, 2) if i < steps - 1 else 0
+            
+            step_x = int(current_x + (x - current_x) * progress + jitter_x)
+            step_y = int(current_y + (y - current_y) * progress + jitter_y)
+            
+            subprocess.run(
+                ['xdotool', 'mousemove', str(step_x), str(step_y)],
+                timeout=2, capture_output=True
+            )
+            time.sleep(random.uniform(0.01, 0.04))
+        
+        # Posição final exata
+        subprocess.run(
+            ['xdotool', 'mousemove', '--sync', str(int(x)), str(int(y))],
+            timeout=5, capture_output=True
+        )
+        
+        # Delay humano antes do clique
+        time.sleep(random.uniform(0.08, 0.25))
+        
+        # Clique
+        subprocess.run(
+            ['xdotool', 'click', '1'],
+            timeout=5, capture_output=True
+        )
+        
+        browser_log.info(f"xdotool HUMAN CLICK em ({int(x)}, {int(y)}) com {steps} steps")
+        return True
+    except Exception as e:
+        browser_log.error(f"xdotool human click falhou: {e}")
+        return xdotool_click(x, y)  # Fallback para clique simples
+
+# ============================================================
+# TURNSTILE - Encontrar posição do iframe e clicar com xdotool
+# ============================================================
+async def find_and_click_turnstile(page):
+    """
+    Encontra o iframe do Turnstile, calcula a posição do checkbox na tela,
+    e usa xdotool para fazer um clique REAL (não CDP).
+    """
+    log.info("Procurando iframe do Turnstile...")
+    
+    # Método 1: Encontrar iframe do Cloudflare Turnstile
+    try:
+        iframe_info = await page.evaluate("""() => {
+            // Procurar iframe do Turnstile
+            const selectors = [
+                'iframe[src*="challenges.cloudflare.com"]',
+                'iframe[src*="turnstile"]',
+                '.cf-turnstile iframe',
+                '[data-sitekey] iframe',
+            ];
+            
+            for (const sel of selectors) {
+                const iframe = document.querySelector(sel);
+                if (iframe) {
+                    const rect = iframe.getBoundingClientRect();
+                    return {
+                        found: true,
+                        x: rect.x,
+                        y: rect.y,
+                        width: rect.width,
+                        height: rect.height,
+                        src: iframe.src || 'N/A',
+                        selector: sel
+                    };
+                }
+            }
+            
+            // Procurar o container .cf-turnstile
+            const container = document.querySelector('.cf-turnstile, [data-sitekey]');
+            if (container) {
+                const rect = container.getBoundingClientRect();
+                return {
+                    found: true,
+                    x: rect.x,
+                    y: rect.y,
+                    width: rect.width,
+                    height: rect.height,
+                    src: 'container',
+                    selector: '.cf-turnstile'
+                };
+            }
+            
+            return { found: false };
+        }""")
+        
+        if iframe_info and iframe_info.get('found'):
+            browser_log.info(f"Turnstile encontrado via: {iframe_info['selector']}")
+            browser_log.info(f"  Posição no viewport: x={iframe_info['x']}, y={iframe_info['y']}")
+            browser_log.info(f"  Tamanho: {iframe_info['width']}x{iframe_info['height']}")
+            browser_log.info(f"  Src: {iframe_info.get('src', 'N/A')[:80]}")
+            
+            # Agora precisamos converter coordenadas do viewport para coordenadas da tela
+            # Pegar a posição da janela do browser na tela
+            window_info = await page.evaluate("""() => {
+                return {
+                    screenX: window.screenX || window.screenLeft || 0,
+                    screenY: window.screenY || window.screenTop || 0,
+                    outerWidth: window.outerWidth,
+                    outerHeight: window.outerHeight,
+                    innerWidth: window.innerWidth,
+                    innerHeight: window.innerHeight,
+                };
+            }""")
+            
+            browser_log.info(f"  Window: screenX={window_info['screenX']}, screenY={window_info['screenY']}")
+            browser_log.info(f"  Inner: {window_info['innerWidth']}x{window_info['innerHeight']}")
+            browser_log.info(f"  Outer: {window_info['outerWidth']}x{window_info['outerHeight']}")
+            
+            # Calcular offset da barra de título/chrome do browser
+            chrome_height = window_info['outerHeight'] - window_info['innerHeight']
+            chrome_width_offset = (window_info['outerWidth'] - window_info['innerWidth']) // 2
+            
+            # O checkbox do Turnstile fica no lado esquerdo do iframe
+            # Aproximadamente 30px da borda esquerda e centralizado verticalmente
+            checkbox_x_in_iframe = 30
+            checkbox_y_in_iframe = iframe_info['height'] / 2
+            
+            # Coordenadas absolutas na tela
+            screen_x = int(window_info['screenX'] + chrome_width_offset + iframe_info['x'] + checkbox_x_in_iframe)
+            screen_y = int(window_info['screenY'] + chrome_height + iframe_info['y'] + checkbox_y_in_iframe)
+            
+            browser_log.info(f"  Chrome height: {chrome_height}px")
+            browser_log.info(f"  Coordenadas de tela calculadas: ({screen_x}, {screen_y})")
+            
+            return screen_x, screen_y
+    except Exception as e:
+        browser_log.warning(f"Erro ao localizar Turnstile: {e}")
+    
+    # Método 2: Procurar por frames do Playwright/Patchright
+    try:
+        for frame in page.frames:
+            if 'challenges.cloudflare' in frame.url or 'turnstile' in frame.url:
+                browser_log.info(f"Frame do Turnstile encontrado: {frame.url[:80]}")
+                
+                frame_element = await frame.frame_element()
+                if frame_element:
+                    box = await frame_element.bounding_box()
+                    if box:
+                        browser_log.info(f"  BoundingBox: x={box['x']}, y={box['y']}, w={box['width']}, h={box['height']}")
+                        
+                        window_info = await page.evaluate("""() => {
+                            return {
+                                screenX: window.screenX || 0,
+                                screenY: window.screenY || 0,
+                                outerHeight: window.outerHeight,
+                                innerHeight: window.innerHeight,
+                                outerWidth: window.outerWidth,
+                                innerWidth: window.innerWidth,
+                            };
+                        }""")
+                        
+                        chrome_height = window_info['outerHeight'] - window_info['innerHeight']
+                        chrome_width_offset = (window_info['outerWidth'] - window_info['innerWidth']) // 2
+                        
+                        screen_x = int(window_info['screenX'] + chrome_width_offset + box['x'] + 30)
+                        screen_y = int(window_info['screenY'] + chrome_height + box['y'] + box['height'] / 2)
+                        
+                        browser_log.info(f"  Coordenadas de tela (método 2): ({screen_x}, {screen_y})")
+                        return screen_x, screen_y
+    except Exception as e:
+        browser_log.warning(f"Erro método 2: {e}")
+    
+    return None, None
+
+# ============================================================
+# TURNSTILE HELPER - Espera o token ser resolvido
+# ============================================================
+async def wait_for_turnstile(page, timeout=120):
+    """
+    Aguarda o Turnstile ser resolvido. Verifica periodicamente se o token
+    apareceu no input hidden.
+    """
+    log.info("Aguardando resolução do Turnstile...")
+    start = time.time()
+    
+    while time.time() - start < timeout:
+        try:
+            token = await page.evaluate("""() => {
+                // Método 1: input hidden
+                const input = document.querySelector('input[name="cf-turnstile-response"]');
+                if (input && input.value && input.value.length > 10) return input.value;
+                
+                // Método 2: data attribute
+                const success = document.querySelector('[data-turnstile-response]');
+                if (success) {
+                    const val = success.getAttribute('data-turnstile-response');
+                    if (val && val.length > 10) return val;
+                }
+                
+                // Método 3: window.turnstile API
+                if (window.turnstile) {
+                    try {
+                        const widgets = document.querySelectorAll('.cf-turnstile');
+                        for (const w of widgets) {
+                            const widgetId = w.getAttribute('data-widget-id');
+                            if (widgetId) {
+                                const resp = window.turnstile.getResponse(widgetId);
+                                if (resp) return resp;
+                            }
+                        }
+                    } catch(e) {}
+                }
+                
+                return null;
+            }""")
+            
+            if token:
+                log.info(f"Turnstile RESOLVIDO! Token: {token[:50]}...")
+                return token
+            
+        except Exception as e:
+            browser_log.debug(f"Turnstile check error: {e}")
+        
+        elapsed = int(time.time() - start)
+        if elapsed % 10 == 0 and elapsed > 0:
+            log.info(f"  Aguardando Turnstile... ({elapsed}s/{timeout}s)")
+            
+            # Log do estado visual
+            try:
+                state = await page.evaluate("""() => {
+                    const iframe = document.querySelector('iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"]');
+                    if (!iframe) {
+                        const container = document.querySelector('.cf-turnstile, [data-sitekey]');
+                        if (!container) return 'NOT_FOUND';
+                        const innerIframe = container.querySelector('iframe');
+                        if (!innerIframe) return 'CONTAINER_NO_IFRAME';
+                        return 'CONTAINER_WITH_IFRAME';
+                    }
+                    return 'IFRAME_PRESENT: ' + (iframe.src || '').substring(0, 60);
+                }""")
+                browser_log.info(f"  Turnstile state: {state}")
+            except:
+                pass
+        
+        await asyncio.sleep(2)
+    
+    log.warning(f"Turnstile não resolveu em {timeout}s")
+    return None
+
+# ============================================================
+# VERIFICAR SE BOTÃO CONTINUE ESTÁ HABILITADO
+# ============================================================
+async def check_continue_enabled(page):
+    """Verifica se o botão Continue está habilitado (Turnstile resolvido)"""
+    try:
+        result = await page.evaluate("""() => {
+            const btns = document.querySelectorAll('button');
+            for (const btn of btns) {
+                const text = btn.textContent.trim().toLowerCase();
+                if (text.includes('continue') || text.includes('sign')) {
+                    return {
+                        text: btn.textContent.trim(),
+                        disabled: btn.disabled,
+                        className: btn.className
+                    };
+                }
+            }
+            return null;
+        }""")
+        return result
+    except:
+        return None
+
+# ============================================================
+# FLUXO PRINCIPAL
 # ============================================================
 async def main():
+    start_time = time.time()
+    
+    engine = "PATCHRIGHT (INDETECTÁVEL)" if USING_PATCHRIGHT else "PLAYWRIGHT (detectável)"
+    click_method = "xdotool (REAL CLICK)" if XDOTOOL_AVAILABLE else "CDP (fallback)"
+    
     banner = f"""
 {C.CY}{C.BD}
 {'='*60}
-   MANUS ACCOUNT CREATOR - KALI LINUX NETHUNTER
-   Emailnator + Playwright + Turnstile (Semi-Auto)
+   MANUS ACCOUNT CREATOR V4 - KALI NETHUNTER + KeX
+   {engine}
+   Turnstile: {click_method}
 {'='*60}
-   Proxy: {PROXY_HOST}:{PROXY_PORT}
-   Logs:  {log_path}
+   DISPLAY:  {os.environ.get('DISPLAY', 'N/A')}
+   Engine:   {engine}
+   Click:    {click_method}
+   Proxy:    {PROXY_HOST}:{PROXY_PORT}
+   Logs:     {LOG_DIR}
+   Log File: {main_log_file}
 {'='*60}
 {C.RS}"""
     print(banner)
     
+    log.info("=" * 60)
+    log.info(f"MANUS ACCOUNT CREATOR V4 INICIADO")
+    log.info(f"Engine: {engine}")
+    log.info(f"Click method: {click_method}")
+    log.info(f"xdotool disponível: {XDOTOOL_AVAILABLE}")
+    log.info(f"DISPLAY={os.environ.get('DISPLAY')}")
+    log.info(f"Python={sys.version}")
+    log.info("=" * 60)
+    
+    if not XDOTOOL_AVAILABLE:
+        print(f"\n{C.Y}{C.BD}  [!] AVISO: xdotool NÃO instalado!{C.RS}")
+        print(f"{C.Y}  Instale com: apt install xdotool{C.RS}")
+        print(f"{C.Y}  Sem xdotool, o Turnstile pode falhar.{C.RS}")
+        print(f"{C.Y}  Continuando com clique CDP (fallback)...{C.RS}\n")
+        log.warning("xdotool NÃO disponível - usando CDP fallback")
+    
     # ========================================
-    # PASSO 0: PEDIR LINK DE CONVITE
+    # PASSO 0: LINK DE CONVITE
     # ========================================
-    print(f"{C.Y}{C.BD}[?] Cole o link de convite do Manus:{C.RS}")
+    log_separator("ETAPA 0: LINK DE CONVITE")
+    
+    print(f"{C.Y}{C.BD}[?] Cole o link de convite do Manus (ENTER = padrão):{C.RS}")
     invite_url = input(f"{C.CY}    > {C.RS}").strip()
     
     if not invite_url:
-        invite_url = "https://manus.im/invitation/OB746IYA9QIKG?utm_source=invitation&utm_medium=social&utm_campaign=system_share"
-        log.warning(f"Nenhum link fornecido, usando padrão: {invite_url}")
+        invite_url = f"https://manus.im/invitation/{DEFAULT_INVITE}?utm_source=invitation&utm_medium=social&utm_campaign=system_share"
+        log.warning(f"Usando link padrão: {invite_url}")
     
-    # Extrair código de convite
     invite_code = None
     if '/invitation/' in invite_url:
         parts = invite_url.split('/invitation/')
@@ -326,198 +733,407 @@ async def main():
             invite_code = parts[1].split('?')[0].split('/')[0]
     
     if not invite_code:
-        log.error("Não foi possível extrair o código de convite do link!")
+        log.error("Código de convite não extraído!")
         return
     
     log.info(f"Código de convite: {invite_code}")
-    log.info(f"Link completo: {invite_url}")
     
     # ========================================
-    # PASSO 1: GERAR GMAIL VIA EMAILNATOR
+    # PASSO 1: GERAR GMAIL
     # ========================================
-    print(f"\n{C.G}{C.BD}{'='*60}")
-    print(f"  ETAPA 1: GERANDO GMAIL TEMPORÁRIO")
-    print(f"{'='*60}{C.RS}\n")
+    log_separator("ETAPA 1: GERANDO GMAIL TEMPORÁRIO")
     
     emailnator = Emailnator()
     email = None
     
     for attempt in range(3):
+        log.info(f"Tentativa {attempt+1}/3...")
         email = emailnator.generate_email()
         if email:
             break
-        log.warning(f"Tentativa {attempt+1}/3 falhou, tentando novamente...")
-        emailnator = Emailnator()  # Reset session
+        emailnator = Emailnator()
         time.sleep(2)
     
     if not email:
-        log.error("FALHA: Não foi possível gerar Gmail temporário!")
+        log.error("FALHA: Não foi possível gerar Gmail!")
         return
     
-    print(f"{C.G}{C.BD}  Gmail gerado: {email}{C.RS}")
+    print(f"\n{C.G}{C.BD}  [OK] Gmail: {email}{C.RS}")
     
     # ========================================
     # PASSO 2: GERAR SENHA
     # ========================================
+    log_separator("ETAPA 2: GERANDO SENHA")
     password = generate_manus_password(20)
-    print(f"{C.G}{C.BD}  Senha gerada: {password}{C.RS}")
+    print(f"{C.G}{C.BD}  [OK] Senha: {password}{C.RS}")
+    
+    log_to_file(creds_file, f"INICIO | email={email} | senha={password} | convite={invite_code}")
     
     # ========================================
-    # PASSO 3: ABRIR PLAYWRIGHT PARA TURNSTILE
+    # PASSO 3: ABRIR BROWSER
     # ========================================
-    print(f"\n{C.M}{C.BD}{'='*60}")
-    print(f"  ETAPA 2: RESOLVENDO CLOUDFLARE TURNSTILE")
-    print(f"{'='*60}{C.RS}\n")
-    
-    from playwright.async_api import async_playwright
+    log_separator(f"ETAPA 3: ABRINDO BROWSER ({engine})")
     
     async with async_playwright() as p:
-        # Lançar browser VISÍVEL para resolver Turnstile
-        log.info("Iniciando Playwright (modo visível para Turnstile)...")
-        browser = await p.chromium.launch(
-            headless=False,
-            args=[
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
+        
+        browser_args = [
+            '--no-sandbox',
+            '--disable-dev-shm-usage',
+            '--window-size=1280,720',
+            '--window-position=0,0',
+        ]
+        
+        if not USING_PATCHRIGHT:
+            browser_args.extend([
                 '--disable-blink-features=AutomationControlled',
-            ]
-        )
+                '--disable-features=IsolateOrigins,site-per-process',
+            ])
+        
+        try:
+            browser = await p.chromium.launch(
+                headless=False,
+                args=browser_args,
+            )
+            browser_log.info(f"Browser lançado! Engine: {engine}")
+            log.info(f"Browser aberto no desktop KeX!")
+        except Exception as e:
+            log.error(f"FALHA ao lançar browser: {e}")
+            log.error(traceback.format_exc())
+            return
         
         context = await browser.new_context(
             user_agent=USER_AGENT,
-            viewport={'width': 430, 'height': 932},
+            viewport={'width': 1200, 'height': 680},
             locale='en-US',
         )
         
-        # Remover detecção de automação
-        await context.add_init_script("""
-            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-            delete navigator.__proto__.webdriver;
-        """)
+        if not USING_PATCHRIGHT:
+            await context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                delete navigator.__proto__.webdriver;
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                    Promise.resolve({ state: Notification.permission }) :
+                    originalQuery(parameters)
+                );
+                window.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['en-US', 'en']
+                });
+            """)
+        
+        browser_log.info("Contexto criado")
         
         page = await context.new_page()
         
-        # Variáveis para capturar dados
+        # Dados capturados
         captured_data = {
             'cf_token': None,
             'temp_token': None,
             'auth_token': None,
+            'all_responses': [],
         }
         
-        # Interceptar requisições para capturar tokens
+        # Interceptar requisições
+        async def on_request(request):
+            if 'manus' in request.url:
+                http_log.debug(f">>> {request.method} {request.url}")
+        
         async def on_response(response):
             url = response.url
+            status = response.status
+            
             try:
-                if 'GetUserPlatforms' in url:
+                if 'manus.im' in url or 'api.manus' in url:
                     body = await response.text()
-                    data = json.loads(body)
-                    if data.get('tempToken'):
-                        captured_data['temp_token'] = data['tempToken']
-                        log.info(f"tempToken capturado: {data['tempToken']}")
-                
-                elif 'RegisterByEmail' in url:
-                    body = await response.text()
-                    data = json.loads(body)
-                    if data.get('token'):
-                        captured_data['auth_token'] = data['token']
-                        log.info(f"Auth JWT Token capturado!")
-                
-                elif 'SendEmailVerifyCode' in url:
-                    log.info("Código de verificação enviado pelo Manus!")
+                    http_log.info(f"<<< {status} {url}")
+                    http_log.debug(f"    Body: {body[:500]}")
                     
+                    captured_data['all_responses'].append({
+                        'url': url, 'status': status,
+                        'body': body[:2000],
+                        'time': datetime.now().isoformat()
+                    })
+                    
+                    try:
+                        data = json.loads(body)
+                    except:
+                        data = {}
+                    
+                    if 'GetUserPlatforms' in url and data.get('tempToken'):
+                        captured_data['temp_token'] = data['tempToken']
+                        log.info(f">>> tempToken CAPTURADO!")
+                    
+                    elif 'RegisterByEmail' in url and data.get('token'):
+                        captured_data['auth_token'] = data['token']
+                        log.info(f">>> JWT Token CAPTURADO!")
+                    
+                    elif 'SendEmailVerifyCode' in url:
+                        log.info(">>> Código de verificação ENVIADO!")
             except:
                 pass
         
+        page.on("request", on_request)
         page.on("response", on_response)
+        page.on("console", lambda msg: browser_log.debug(f"CONSOLE: {msg.text}"))
         
-        # Navegar para a página de login com o código de convite
+        # ========================================
+        # PASSO 4: NAVEGAR PARA MANUS LOGIN
+        # ========================================
+        log_separator("ETAPA 4: NAVEGANDO PARA MANUS.IM")
+        
         login_url = f"https://manus.im/login?code={invite_code}"
-        log.info(f"Navegando para: {login_url}")
+        log.info(f"Navegando: {login_url}")
         
         try:
-            await page.goto(login_url, wait_until="networkidle", timeout=60000)
+            await page.goto(login_url, wait_until="domcontentloaded", timeout=60000)
         except:
-            log.warning("Timeout ao carregar página, continuando...")
+            log.warning("Timeout ao carregar (normal)")
         
-        await asyncio.sleep(3)
+        # Esperar a página carregar completamente
+        await asyncio.sleep(5)
         
-        # ========================================
-        # PASSO 4: PREENCHER E-MAIL E RESOLVER TURNSTILE
-        # ========================================
-        print(f"\n{C.Y}{C.BD}{'='*60}")
-        print(f"  ETAPA 3: PREENCHENDO FORMULÁRIO")
-        print(f"{'='*60}{C.RS}\n")
-        
-        # Tentar encontrar e preencher o campo de e-mail
-        log.info("Procurando campo de e-mail...")
-        
+        # Screenshot
         try:
-            # Esperar o campo de e-mail aparecer
+            ss = os.path.join(LOG_DIR, f"{timestamp}_01_login_page.png")
+            await page.screenshot(path=ss)
+            browser_log.info(f"Screenshot: {ss}")
+        except:
+            pass
+        
+        # ========================================
+        # PASSO 5: PREENCHER E-MAIL
+        # ========================================
+        log_separator("ETAPA 5: PREENCHENDO E-MAIL")
+        
+        email_filled = False
+        try:
             email_input = await page.wait_for_selector(
-                'input[type="email"], input[name="email"], input[placeholder*="email" i], input[placeholder*="Email" i]',
+                'input[type="email"], input[name="email"], input[placeholder*="email" i]',
                 timeout=15000
             )
-            
             if email_input:
+                await email_input.click()
+                await asyncio.sleep(0.3)
                 await email_input.fill(email)
+                email_filled = True
                 log.info(f"E-mail preenchido: {email}")
-                await asyncio.sleep(1)
         except Exception as e:
-            log.warning(f"Campo de e-mail não encontrado automaticamente: {e}")
-            log.info("Tentando via seletor alternativo...")
+            log.warning(f"Seletor principal falhou: {e}")
             try:
                 inputs = await page.query_selector_all('input')
                 for inp in inputs:
-                    inp_type = await inp.get_attribute('type')
-                    inp_placeholder = await inp.get_attribute('placeholder') or ''
-                    if inp_type == 'email' or 'email' in inp_placeholder.lower():
+                    inp_type = await inp.get_attribute('type') or ''
+                    inp_ph = await inp.get_attribute('placeholder') or ''
+                    if 'email' in inp_type.lower() or 'email' in inp_ph.lower():
                         await inp.fill(email)
-                        log.info(f"E-mail preenchido via seletor alternativo")
+                        email_filled = True
+                        log.info("E-mail preenchido via fallback")
                         break
             except:
                 pass
         
-        # Agora o usuário precisa resolver o Turnstile manualmente
-        print(f"\n{C.Y}{C.BD}")
-        print("!" * 60)
-        print("!  RESOLVA O CAPTCHA TURNSTILE NO NAVEGADOR QUE ABRIU  !")
-        print("!  Depois clique em 'Continue' / 'Sign Up'             !")
-        print("!  O script vai capturar tudo automaticamente          !")
-        print("!" * 60)
-        print(f"{C.RS}\n")
+        if not email_filled:
+            print(f"\n{C.Y}{C.BD}  [!] PREENCHA O E-MAIL NO BROWSER: {email}{C.RS}\n")
         
-        log.info("Aguardando resolução do Turnstile e envio do formulário...")
-        log.info("O script está monitorando as requisições em segundo plano...")
+        await asyncio.sleep(2)
         
-        # Esperar até que o tempToken seja capturado (significa que o Turnstile foi resolvido)
-        wait_start = time.time()
-        max_turnstile_wait = 300  # 5 minutos
+        # ========================================
+        # PASSO 6: RESOLVER TURNSTILE COM XDOTOOL
+        # ========================================
+        log_separator("ETAPA 6: RESOLVENDO TURNSTILE")
         
-        while time.time() - wait_start < max_turnstile_wait:
-            if captured_data['temp_token']:
-                log.info("Turnstile resolvido! tempToken capturado!")
+        cf_token = None
+        max_turnstile_attempts = 3
+        
+        for attempt in range(max_turnstile_attempts):
+            log.info(f"Tentativa Turnstile {attempt + 1}/{max_turnstile_attempts}")
+            
+            # Esperar o iframe do Turnstile aparecer
+            log.info("Aguardando iframe do Turnstile carregar...")
+            await asyncio.sleep(3)
+            
+            # Encontrar posição do Turnstile
+            screen_x, screen_y = await find_and_click_turnstile(page)
+            
+            if screen_x is not None and screen_y is not None:
+                if XDOTOOL_AVAILABLE:
+                    print(f"\n{C.G}{C.BD}")
+                    print(f"  XDOTOOL REAL CLICK - Bypass Turnstile!")
+                    print(f"  Coordenadas: ({screen_x}, {screen_y})")
+                    print(f"{C.RS}\n")
+                    
+                    # Clique humano com xdotool
+                    success = xdotool_human_click(screen_x, screen_y)
+                    
+                    if success:
+                        log.info(f"xdotool clicou em ({screen_x}, {screen_y})")
+                    else:
+                        log.warning("xdotool falhou, tentando clique simples...")
+                        xdotool_click(screen_x, screen_y)
+                else:
+                    # Fallback: clique CDP (pode ser detectado)
+                    log.warning("Usando clique CDP (sem xdotool)")
+                    try:
+                        # Converter coordenadas de tela de volta para viewport
+                        window_info = await page.evaluate("""() => ({
+                            screenX: window.screenX || 0,
+                            screenY: window.screenY || 0,
+                            outerHeight: window.outerHeight,
+                            innerHeight: window.innerHeight,
+                            outerWidth: window.outerWidth,
+                            innerWidth: window.innerWidth,
+                        })""")
+                        chrome_h = window_info['outerHeight'] - window_info['innerHeight']
+                        chrome_w = (window_info['outerWidth'] - window_info['innerWidth']) // 2
+                        vp_x = screen_x - window_info['screenX'] - chrome_w
+                        vp_y = screen_y - window_info['screenY'] - chrome_h
+                        await page.mouse.click(vp_x, vp_y)
+                        browser_log.info(f"CDP click em viewport ({vp_x}, {vp_y})")
+                    except Exception as e:
+                        browser_log.warning(f"CDP click falhou: {e}")
+            else:
+                log.warning("Turnstile iframe NÃO encontrado!")
+                
+                # Tentar encontrar de outra forma - clicar em qualquer checkbox visível
+                try:
+                    for frame in page.frames:
+                        if 'challenges.cloudflare' in frame.url:
+                            browser_log.info(f"Tentando clicar dentro do frame: {frame.url[:60]}")
+                            try:
+                                await frame.click('body', timeout=3000)
+                            except:
+                                pass
+                except:
+                    pass
+            
+            # Screenshot pós-clique
+            try:
+                ss = os.path.join(LOG_DIR, f"{timestamp}_02_turnstile_attempt{attempt+1}.png")
+                await page.screenshot(path=ss)
+            except:
+                pass
+            
+            # Esperar resolução
+            cf_token = await wait_for_turnstile(page, timeout=30)
+            
+            if cf_token:
+                log.info("TURNSTILE RESOLVIDO COM SUCESSO!")
                 break
-            await asyncio.sleep(2)
+            
+            # Verificar se o botão Continue ficou habilitado (indica sucesso)
+            btn_state = await check_continue_enabled(page)
+            if btn_state and not btn_state.get('disabled', True):
+                log.info(f"Botão Continue HABILITADO! ({btn_state.get('text', '')})")
+                break
+            
+            if attempt < max_turnstile_attempts - 1:
+                log.warning("Turnstile não resolveu, recarregando página...")
+                try:
+                    await page.reload(wait_until="domcontentloaded", timeout=30000)
+                except:
+                    pass
+                await asyncio.sleep(3)
+                
+                # Preencher email novamente
+                try:
+                    email_input = await page.wait_for_selector(
+                        'input[type="email"], input[placeholder*="email" i]',
+                        timeout=10000
+                    )
+                    if email_input:
+                        await email_input.fill(email)
+                        log.info("E-mail preenchido novamente")
+                except:
+                    pass
+                await asyncio.sleep(2)
         
-        if not captured_data['temp_token']:
-            log.error("TIMEOUT: Turnstile não foi resolvido em 5 minutos")
-            await browser.close()
-            return
+        # Screenshot pós-Turnstile
+        try:
+            ss = os.path.join(LOG_DIR, f"{timestamp}_03_post_turnstile.png")
+            await page.screenshot(path=ss)
+        except:
+            pass
         
         # ========================================
-        # PASSO 5: ENVIAR CÓDIGO DE VERIFICAÇÃO
+        # PASSO 7: CLICAR CONTINUE
         # ========================================
-        print(f"\n{C.B}{C.BD}{'='*60}")
-        print(f"  ETAPA 4: ENVIANDO CÓDIGO DE VERIFICAÇÃO")
-        print(f"{'='*60}{C.RS}\n")
+        log_separator("ETAPA 7: CLICANDO CONTINUE")
         
-        # Verificar se o Manus já enviou o código automaticamente
-        # Se não, enviar manualmente via API
+        try:
+            continue_btn = await page.wait_for_selector(
+                'button:has-text("Continue"), button:has-text("Sign"), button[type="submit"]',
+                timeout=10000
+            )
+            if continue_btn:
+                is_disabled = await continue_btn.get_attribute('disabled')
+                if is_disabled:
+                    log.warning("Botão Continue desabilitado - aguardando...")
+                    await asyncio.sleep(5)
+                
+                # Usar xdotool para clicar no Continue também (mais seguro)
+                if XDOTOOL_AVAILABLE:
+                    try:
+                        box = await continue_btn.bounding_box()
+                        if box:
+                            window_info = await page.evaluate("""() => ({
+                                screenX: window.screenX || 0,
+                                screenY: window.screenY || 0,
+                                outerHeight: window.outerHeight,
+                                innerHeight: window.innerHeight,
+                                outerWidth: window.outerWidth,
+                                innerWidth: window.innerWidth,
+                            })""")
+                            chrome_h = window_info['outerHeight'] - window_info['innerHeight']
+                            chrome_w = (window_info['outerWidth'] - window_info['innerWidth']) // 2
+                            btn_x = int(window_info['screenX'] + chrome_w + box['x'] + box['width'] / 2)
+                            btn_y = int(window_info['screenY'] + chrome_h + box['y'] + box['height'] / 2)
+                            xdotool_click(btn_x, btn_y)
+                            log.info(f"Continue clicado via xdotool em ({btn_x}, {btn_y})")
+                    except:
+                        await continue_btn.click()
+                        log.info("Continue clicado via CDP (fallback)")
+                else:
+                    await continue_btn.click()
+                    log.info("Botão Continue clicado!")
+                
+                await asyncio.sleep(3)
+        except Exception as e:
+            log.warning(f"Botão Continue não encontrado: {e}")
+            try:
+                await page.keyboard.press('Enter')
+                log.info("Enter pressionado como fallback")
+            except:
+                pass
+        
+        # Esperar tempToken
+        log.info("Aguardando tempToken...")
+        wait_start = time.time()
+        while time.time() - wait_start < 30:
+            if captured_data['temp_token']:
+                break
+            await asyncio.sleep(1)
+        
+        # Screenshot
+        try:
+            ss = os.path.join(LOG_DIR, f"{timestamp}_04_after_continue.png")
+            await page.screenshot(path=ss)
+        except:
+            pass
+        
+        # ========================================
+        # PASSO 8: ENVIAR CÓDIGO DE VERIFICAÇÃO
+        # ========================================
+        log_separator("ETAPA 8: ENVIANDO CÓDIGO DE VERIFICAÇÃO")
+        
         import requests as req_lib
         
         if captured_data['temp_token']:
-            log.info("Enviando solicitação de código de verificação via API...")
-            
+            log.info("Enviando solicitação de código via API...")
             try:
                 api_headers = {
                     'Content-Type': 'application/json',
@@ -525,14 +1141,14 @@ async def main():
                     'Referer': 'https://manus.im/',
                     'User-Agent': USER_AGENT,
                 }
-                
                 send_code_payload = {
                     "email": email,
                     "action": "SEND_EMAIL_ACTION_REGISTER",
                     "token": captured_data['temp_token']
                 }
                 
-                log.debug(f"Payload SendCode: {json.dumps(send_code_payload, indent=2)}")
+                http_log.info(f"POST SendEmailVerifyCodeWithCaptcha")
+                http_log.info(f"  Payload: {json.dumps(send_code_payload, indent=2)}")
                 
                 resp = req_lib.post(
                     f"{MANUS_API}/user.v1.UserAuthPublicService/SendEmailVerifyCodeWithCaptcha",
@@ -541,23 +1157,22 @@ async def main():
                     timeout=30
                 )
                 
-                log.info(f"SendCode Status: {resp.status_code}")
-                log.debug(f"SendCode Response: {resp.text[:300]}")
+                http_log.info(f"  Status: {resp.status_code}")
+                http_log.info(f"  Response: {resp.text[:500]}")
                 
                 if resp.status_code == 200:
-                    log.info("CÓDIGO DE VERIFICAÇÃO ENVIADO COM SUCESSO!")
+                    log.info("CÓDIGO ENVIADO COM SUCESSO!")
                 else:
-                    log.warning(f"Possível erro ao enviar código: {resp.status_code}")
-                    
+                    log.warning(f"Erro ao enviar código: {resp.status_code}")
             except Exception as e:
-                log.error(f"Erro ao enviar código: {e}")
+                log.error(f"Erro: {e}")
+        else:
+            log.warning("tempToken não capturado - o código pode ter sido enviado via browser")
         
         # ========================================
-        # PASSO 6: MONITORAR EMAILNATOR PARA CÓDIGO
+        # PASSO 9: CAPTURAR CÓDIGO DO E-MAIL
         # ========================================
-        print(f"\n{C.CY}{C.BD}{'='*60}")
-        print(f"  ETAPA 5: CAPTURANDO CÓDIGO DO E-MAIL")
-        print(f"{'='*60}{C.RS}\n")
+        log_separator("ETAPA 9: CAPTURANDO CÓDIGO DO E-MAIL")
         
         verify_code = emailnator.wait_for_code(sender_filter="manus", max_wait=180)
         
@@ -567,46 +1182,43 @@ async def main():
             verify_code = input(f"{C.CY}    > {C.RS}").strip()
         
         if not verify_code or len(verify_code) != 6:
-            log.error("Código de verificação inválido!")
+            log.error(f"Código inválido: '{verify_code}'")
             await browser.close()
             return
         
-        log.info(f"Código de verificação: {verify_code}")
+        log.info(f"Código: {verify_code}")
         
         # ========================================
-        # PASSO 7: COMPLETAR REGISTRO VIA API
+        # PASSO 10: PREENCHER CÓDIGO NA PÁGINA
         # ========================================
-        print(f"\n{C.G}{C.BD}{'='*60}")
-        print(f"  ETAPA 6: COMPLETANDO REGISTRO")
-        print(f"{'='*60}{C.RS}\n")
+        log_separator("ETAPA 10: PREENCHENDO CÓDIGO")
         
-        # Preencher o código no campo da página
         try:
             code_inputs = await page.query_selector_all('input[type="text"], input[type="number"], input[type="tel"]')
+            browser_log.info(f"Inputs para código: {len(code_inputs)}")
             
-            # Se há múltiplos inputs (um por dígito)
             if len(code_inputs) >= 6:
                 for idx, digit in enumerate(verify_code):
                     if idx < len(code_inputs):
                         await code_inputs[idx].fill(digit)
                         await asyncio.sleep(0.1)
-                log.info("Código preenchido nos campos individuais")
+                log.info("Código preenchido (campos individuais)")
             elif len(code_inputs) >= 1:
-                # Input único para o código
                 for inp in code_inputs:
-                    placeholder = await inp.get_attribute('placeholder') or ''
-                    if 'code' in placeholder.lower() or 'verif' in placeholder.lower() or 'digit' in placeholder.lower():
+                    ph = await inp.get_attribute('placeholder') or ''
+                    if 'code' in ph.lower() or 'verif' in ph.lower():
                         await inp.fill(verify_code)
-                        log.info("Código preenchido no campo único")
+                        log.info("Código preenchido (campo único)")
                         break
-            
             await asyncio.sleep(2)
-            
         except Exception as e:
-            log.warning(f"Erro ao preencher código na página: {e}")
-            log.info("Tentando completar via API diretamente...")
+            log.warning(f"Erro ao preencher código: {e}")
         
-        # Também enviar via API para garantir
+        # ========================================
+        # PASSO 11: COMPLETAR REGISTRO VIA API
+        # ========================================
+        log_separator("ETAPA 11: REGISTRANDO CONTA")
+        
         try:
             register_payload = {
                 "authCommandCmd": {
@@ -632,7 +1244,8 @@ async def main():
                 'User-Agent': USER_AGENT,
             }
             
-            log.debug(f"Register Payload: {json.dumps(register_payload, indent=2)}")
+            http_log.info(f"POST RegisterByEmail")
+            http_log.info(f"  Payload: {json.dumps(register_payload, indent=2)}")
             
             resp = req_lib.post(
                 f"{MANUS_API}/user.v1.UserAuthPublicService/RegisterByEmail",
@@ -641,124 +1254,214 @@ async def main():
                 timeout=30
             )
             
-            log.info(f"Register Status: {resp.status_code}")
-            log.debug(f"Register Response: {resp.text[:500]}")
+            http_log.info(f"  Status: {resp.status_code}")
+            http_log.info(f"  Response: {resp.text[:500]}")
             
             if resp.status_code == 200:
                 data = json.loads(resp.text)
                 if data.get('token'):
                     captured_data['auth_token'] = data['token']
-                    log.info("REGISTRO CONCLUÍDO COM SUCESSO! JWT Token recebido!")
+                    log.info("REGISTRO CONCLUÍDO! JWT Token recebido!")
                 else:
-                    log.warning(f"Resposta 200 mas sem token: {resp.text[:200]}")
+                    log.warning(f"200 sem token: {resp.text[:200]}")
             else:
-                log.error(f"Erro no registro: {resp.status_code} - {resp.text[:300]}")
-                
+                log.error(f"Erro registro: {resp.status_code}")
         except Exception as e:
-            log.error(f"Erro ao registrar via API: {e}")
+            log.error(f"Erro: {e}")
+            log.error(traceback.format_exc())
+        
+        # Screenshot
+        try:
+            ss = os.path.join(LOG_DIR, f"{timestamp}_05_register.png")
+            await page.screenshot(path=ss)
+        except:
+            pass
         
         # ========================================
-        # PASSO 8: NAVEGAR ATÉ PÁGINA DE TELEFONE
+        # PASSO 12: SELECIONAR POLÔNIA
         # ========================================
-        print(f"\n{C.M}{C.BD}{'='*60}")
-        print(f"  ETAPA 7: SELECIONANDO PAÍS (POLÔNIA)")
-        print(f"{'='*60}{C.RS}\n")
+        log_separator("ETAPA 12: SELECIONANDO POLÔNIA (+48)")
         
-        # Esperar a página de telefone carregar
         await asyncio.sleep(5)
         
         try:
-            # Verificar se estamos na página de telefone
             current_url = page.url
             log.info(f"URL atual: {current_url}")
             
-            # Tentar encontrar o seletor de país
-            # Procurar por dropdown de país ou campo de telefone
-            country_selectors = [
-                'select[name*="country"]',
-                'select[name*="phone"]',
-                '[class*="country"]',
-                '[class*="phone"]',
-                'button[class*="country"]',
-                '[data-testid*="country"]',
+            selectors = [
+                'select[name*="country"]', '[class*="country"]',
+                'button[class*="country"]', '[data-testid*="country"]',
             ]
             
-            for selector in country_selectors:
+            for sel in selectors:
                 try:
-                    element = await page.wait_for_selector(selector, timeout=5000)
-                    if element:
-                        log.info(f"Seletor de país encontrado: {selector}")
-                        await element.click()
+                    el = await page.wait_for_selector(sel, timeout=5000)
+                    if el:
+                        await el.click()
                         await asyncio.sleep(1)
-                        
-                        # Procurar por "Poland" ou "Polska" na lista
-                        poland = await page.query_selector('text=Poland')
-                        if not poland:
-                            poland = await page.query_selector('text=Polska')
-                        if not poland:
-                            poland = await page.query_selector('text=+48')
-                        
+                        poland = await page.query_selector('text=Poland') or \
+                                 await page.query_selector('text=Polska') or \
+                                 await page.query_selector('text=+48')
                         if poland:
                             await poland.click()
-                            log.info("POLÔNIA SELECIONADA COM SUCESSO!")
-                        break
+                            log.info("POLÔNIA SELECIONADA!")
+                            break
                 except:
                     continue
-            
-            # Se não encontrou automaticamente, tentar via texto
-            try:
-                # Procurar qualquer elemento com "Poland"
-                await page.get_by_text("Poland", exact=False).first.click()
-                log.info("Polônia selecionada via texto!")
-            except:
-                log.info("Seletor de país pode precisar de interação manual")
-                log.info("O navegador está aberto para você completar se necessário")
-            
         except Exception as e:
-            log.warning(f"Erro ao selecionar país: {e}")
+            log.warning(f"Erro país: {e}")
+        
+        # Screenshot final
+        try:
+            ss = os.path.join(LOG_DIR, f"{timestamp}_06_final.png")
+            await page.screenshot(path=ss)
+        except:
+            pass
         
         # ========================================
         # RESULTADO FINAL
         # ========================================
+        elapsed_total = int(time.time() - start_time)
+        
+        log_separator("RESULTADO FINAL")
+        
+        status = "SUCESSO" if captured_data['auth_token'] else "PENDENTE"
+        
         print(f"\n{C.G}{C.BD}")
         print("*" * 60)
-        print("   PROCESSO FINALIZADO!")
+        print(f"   PROCESSO FINALIZADO! [{status}]")
         print("*" * 60)
-        print(f"   Gmail:    {email}")
-        print(f"   Senha:    {password}")
-        print(f"   Convite:  {invite_code}")
-        print(f"   Código:   {verify_code}")
+        print(f"   Engine:     {engine}")
+        print(f"   Click:      {click_method}")
+        print(f"   Gmail:      {email}")
+        print(f"   Senha:      {password}")
+        print(f"   Convite:    {invite_code}")
+        print(f"   Código:     {verify_code}")
+        print(f"   Tempo:      {elapsed_total}s")
         if captured_data['auth_token']:
-            print(f"   Token:    {captured_data['auth_token'][:50]}...")
-            print(f"   Status:   CONTA CRIADA COM SUCESSO!")
-        else:
-            print(f"   Status:   Verifique o navegador para completar")
+            print(f"   Token:      {captured_data['auth_token'][:50]}...")
         print("*" * 60)
         print(f"{C.RS}\n")
         
-        # Salvar credenciais
-        creds_file = os.path.join(os.path.expanduser("~"), "manus_credentials.txt")
-        with open(creds_file, "a") as f:
-            f.write(f"{datetime.now().isoformat()} | {email} | {password} | {invite_code} | {verify_code}\n")
-        log.info(f"Credenciais salvas em: {creds_file}")
+        # Salvar logs finais
+        log_to_file(creds_file, f"{status} | email={email} | senha={password} | convite={invite_code} | codigo={verify_code} | tempo={elapsed_total}s")
         
-        # Salvar token JWT se capturado
         if captured_data['auth_token']:
-            token_file = os.path.join(os.path.expanduser("~"), "manus_tokens.txt")
-            with open(token_file, "a") as f:
-                f.write(f"{datetime.now().isoformat()} | {email} | {captured_data['auth_token']}\n")
-            log.info(f"Token JWT salvo em: {token_file}")
+            log_to_file(tokens_file, f"email={email} | token={captured_data['auth_token']}")
         
-        print(f"{C.Y}[*] O navegador permanecerá aberto para você completar a etapa do telefone se necessário.")
-        print(f"[*] Pressione ENTER para fechar o navegador e encerrar.{C.RS}")
+        # Dump API responses
+        responses_file = os.path.join(LOG_DIR, f"{timestamp}_manus_api_dump.json")
+        with open(responses_file, 'w', encoding='utf-8') as f:
+            json.dump(captured_data['all_responses'], f, indent=2, ensure_ascii=False)
+        
+        log.info("=" * 60)
+        log.info(f"FINALIZADO em {elapsed_total}s | Status: {status}")
+        log.info(f"Respostas API capturadas: {len(captured_data['all_responses'])}")
+        log.info("=" * 60)
+        
+        # ========================================
+        # COMPACTAR TODOS OS LOGS EM ZIP ÚNICO
+        # ========================================
+        log_separator("COMPACTANDO LOGS EM ZIP")
+        
+        # Fechar handlers de log antes de zipar
+        for handler in log.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+        for handler in http_log.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+        for handler in browser_log.handlers[:]:
+            if isinstance(handler, logging.FileHandler):
+                handler.close()
+        
+        # ZIP ÚNICO persistente
+        zip_path = os.path.join(LOG_DIR, "MANUS_LOGS.zip")
+        
+        log_files_to_zip = [
+            main_log_file,
+            http_log_file,
+            browser_log_file,
+            error_log_file,
+            creds_file,
+            tokens_file,
+            responses_file,
+        ]
+        
+        # Adicionar screenshots desta execução
+        for f_name in os.listdir(LOG_DIR):
+            full = os.path.join(LOG_DIR, f_name)
+            if f_name.startswith(timestamp) and f_name.endswith('.png'):
+                if full not in log_files_to_zip:
+                    log_files_to_zip.append(full)
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'a', zipfile.ZIP_DEFLATED) as zf:
+                existing = set(zf.namelist())
+                added = 0
+                for lf in log_files_to_zip:
+                    if os.path.exists(lf):
+                        arcname = os.path.basename(lf)
+                        if arcname in existing and arcname in ['manus_credentials.log', 'manus_tokens.log']:
+                            pass
+                        elif arcname in existing:
+                            continue
+                        zf.write(lf, arcname)
+                        added += 1
+            
+            zip_size = os.path.getsize(zip_path)
+            if zip_size > 1048576:
+                zip_display = f"{zip_size / 1048576:.1f} MB"
+            else:
+                zip_display = f"{zip_size / 1024:.1f} KB"
+            
+            total_files = len(zipfile.ZipFile(zip_path, 'r').namelist())
+            
+            print(f"\n{C.G}{C.BD}  [ZIP] Logs adicionados ao ZIP único!{C.RS}")
+            print(f"  {C.G}  Arquivo:       {zip_path}{C.RS}")
+            print(f"  {C.G}  Tamanho total: {zip_display}{C.RS}")
+            print(f"  {C.G}  Adicionados:   {added} arquivos{C.RS}")
+            print(f"  {C.G}  Total no ZIP:  {total_files} arquivos{C.RS}")
+        except Exception as e:
+            print(f"\n{C.R}  [ERRO] Falha ao criar ZIP: {e}{C.RS}")
+        
+        print(f"\n{C.CY}{C.BD}  LOGS GERADOS:{C.RS}")
+        print(f"  {C.CY}  ZIP:         {zip_path}{C.RS}")
+        print(f"  {C.CY}  Principal:   {main_log_file}{C.RS}")
+        print(f"  {C.CY}  HTTP:        {http_log_file}{C.RS}")
+        print(f"  {C.CY}  Browser:     {browser_log_file}{C.RS}")
+        print(f"  {C.CY}  Erros:       {error_log_file}{C.RS}")
+        print(f"  {C.CY}  Credenciais: {creds_file}{C.RS}")
+        print(f"  {C.CY}  Tokens:      {tokens_file}{C.RS}")
+        print(f"  {C.CY}  API Dump:    {responses_file}{C.RS}")
+        print()
+        
+        print(f"{C.Y}[*] Browser aberto no KeX. ENTER para fechar.{C.RS}")
         input()
         
         await browser.close()
-    
-    print(f"\n{C.CY}[*] Logs detalhados salvos em: {log_path}{C.RS}")
 
 # ============================================================
 # ENTRY POINT
 # ============================================================
 if __name__ == "__main__":
-    asyncio.run(main())
+    display = os.environ.get('DISPLAY')
+    if not display:
+        os.environ['DISPLAY'] = ':1'
+    
+    print(f"{C.CY}[*] Engine: {'PATCHRIGHT' if USING_PATCHRIGHT else 'PLAYWRIGHT'}{C.RS}")
+    print(f"{C.CY}[*] xdotool: {'DISPONÍVEL' if XDOTOOL_AVAILABLE else 'NÃO ENCONTRADO'}{C.RS}")
+    print(f"{C.CY}[*] DISPLAY={os.environ.get('DISPLAY')}{C.RS}")
+    print(f"{C.CY}[*] Iniciando V4...{C.RS}\n")
+    
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print(f"\n{C.Y}[!] Ctrl+C{C.RS}")
+    except Exception as e:
+        print(f"\n{C.R}[ERRO FATAL] {e}{C.RS}")
+        traceback.print_exc()
+        err_file = os.path.join(LOG_DIR, f"FATAL_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
+        with open(err_file, 'w') as f:
+            f.write(f"{e}\n\n{traceback.format_exc()}")
+        print(f"{C.Y}Erro salvo: {err_file}{C.RS}")
