@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
 ==============================================================
-  MANUS ACCOUNT CREATOR V4 - KALI LINUX NETHUNTER + KeX VNC
+  MANUS ACCOUNT CREATOR V5 - KALI LINUX NETHUNTER + KeX VNC
   Patchright + xdotool REAL CLICK Turnstile Bypass + Logging
 ==============================================================
 
-Mudanças V4:
+Mudanças V5:
+- FIX: Removido --sync do xdotool (causava timeout no VNC/KeX)
+- FIX: check_continue_enabled agora ignora botões sociais (Facebook/Google/etc)
+- FIX: Seletor do botão Continue mais preciso
+- FIX: Coordenadas do Turnstile agora usam bounding_box direto (sem window offset)
 - xdotool para cliques REAIS no Turnstile (bypass screenX/screenY)
-- Cloudflare detecta cliques CDP porque screenX/screenY ficam
-  relativos ao iframe (<100). xdotool gera cliques no nível do OS,
-  com coordenadas corretas (>100).
 - Patchright (indetectável) + xdotool = combo perfeito
 - Logs completos em /sdcard/nh_files/MANUS LOGS/
 - ZIP único acumulativo MANUS_LOGS.zip
@@ -362,19 +363,20 @@ def xdotool_click(x, y):
     Isso gera um MouseEvent com screenX/screenY corretos (relativos à tela),
     não ao iframe. O Cloudflare Turnstile verifica se screenX/screenY > 100
     para detectar cliques automatizados via CDP.
+    NOTA: NÃO usar --sync pois causa timeout no VNC/KeX.
     """
     try:
-        # Mover o mouse suavemente para a posição
+        # Mover o mouse para a posição (SEM --sync para evitar timeout no VNC)
         subprocess.run(
-            ['xdotool', 'mousemove', '--sync', str(int(x)), str(int(y))],
-            timeout=5, capture_output=True
+            ['xdotool', 'mousemove', str(int(x)), str(int(y))],
+            timeout=3, capture_output=True
         )
-        time.sleep(0.1 + random.uniform(0.05, 0.15))
+        time.sleep(0.2 + random.uniform(0.05, 0.15))
         
         # Clicar
         subprocess.run(
             ['xdotool', 'click', '1'],
-            timeout=5, capture_output=True
+            timeout=3, capture_output=True
         )
         browser_log.info(f"xdotool REAL CLICK em ({int(x)}, {int(y)})")
         return True
@@ -385,12 +387,13 @@ def xdotool_click(x, y):
 def xdotool_human_click(x, y):
     """
     Clique com movimento humano - move em steps para parecer natural.
+    NOTA: Sem --sync para evitar timeout no VNC/KeX.
     """
     try:
         # Primeiro, pegar posição atual do mouse
         result = subprocess.run(
             ['xdotool', 'getmouselocation'],
-            timeout=5, capture_output=True, text=True
+            timeout=3, capture_output=True, text=True
         )
         current_x, current_y = 0, 0
         if result.stdout:
@@ -402,10 +405,9 @@ def xdotool_human_click(x, y):
                     current_y = int(p.split(':')[1])
         
         # Mover em steps para parecer humano
-        steps = random.randint(5, 12)
+        steps = random.randint(5, 10)
         for i in range(steps):
             progress = (i + 1) / steps
-            # Adicionar um pouco de curva/jitter
             jitter_x = random.uniform(-3, 3) if i < steps - 1 else 0
             jitter_y = random.uniform(-2, 2) if i < steps - 1 else 0
             
@@ -418,10 +420,10 @@ def xdotool_human_click(x, y):
             )
             time.sleep(random.uniform(0.01, 0.04))
         
-        # Posição final exata
+        # Posição final exata (SEM --sync)
         subprocess.run(
-            ['xdotool', 'mousemove', '--sync', str(int(x)), str(int(y))],
-            timeout=5, capture_output=True
+            ['xdotool', 'mousemove', str(int(x)), str(int(y))],
+            timeout=3, capture_output=True
         )
         
         # Delay humano antes do clique
@@ -442,17 +444,103 @@ def xdotool_human_click(x, y):
 # ============================================================
 # TURNSTILE - Encontrar posição do iframe e clicar com xdotool
 # ============================================================
+def get_window_geometry():
+    """
+    Usa xdotool para pegar a geometria REAL da janela ativa.
+    Retorna (x, y, width, height) da janela na tela.
+    """
+    try:
+        # Pegar ID da janela ativa
+        result = subprocess.run(
+            ['xdotool', 'getactivewindow'],
+            timeout=3, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            return None
+        
+        window_id = result.stdout.strip()
+        browser_log.info(f"  Janela ativa ID: {window_id}")
+        
+        # Pegar geometria da janela
+        result = subprocess.run(
+            ['xdotool', 'getwindowgeometry', window_id],
+            timeout=3, capture_output=True, text=True
+        )
+        if result.returncode == 0:
+            # Output: "Window 12345678\n  Position: 0,0 (screen: 0)\n  Geometry: 1280x720"
+            lines = result.stdout.strip().split('\n')
+            pos_x, pos_y = 0, 0
+            width, height = 0, 0
+            for line in lines:
+                if 'Position:' in line:
+                    match = re.search(r'Position:\s*(\d+),(\d+)', line)
+                    if match:
+                        pos_x = int(match.group(1))
+                        pos_y = int(match.group(2))
+                if 'Geometry:' in line:
+                    match = re.search(r'Geometry:\s*(\d+)x(\d+)', line)
+                    if match:
+                        width = int(match.group(1))
+                        height = int(match.group(2))
+            
+            browser_log.info(f"  Window geometry: pos=({pos_x},{pos_y}), size={width}x{height}")
+            return {'x': pos_x, 'y': pos_y, 'width': width, 'height': height}
+    except Exception as e:
+        browser_log.warning(f"  get_window_geometry falhou: {e}")
+    return None
+
 async def find_and_click_turnstile(page):
     """
     Encontra o iframe do Turnstile, calcula a posição do checkbox na tela,
-    e usa xdotool para fazer um clique REAL (não CDP).
+    e retorna as coordenadas para xdotool.
+    
+    Estratégia V5:
+    1. Usa xdotool getactivewindow + getwindowgeometry para posição REAL da janela
+    2. Usa JS getBoundingClientRect para posição do iframe no viewport
+    3. Calcula: screen_pos = window_pos + chrome_offset + viewport_pos + checkbox_offset
     """
     log.info("Procurando iframe do Turnstile...")
     
-    # Método 1: Encontrar iframe do Cloudflare Turnstile
+    # Primeiro, pegar a posição real da janela via xdotool
+    win_geo = get_window_geometry() if XDOTOOL_AVAILABLE else None
+    
+    # Pegar info da janela via JS também (para comparar)
+    window_info = await page.evaluate("""() => {
+        return {
+            screenX: window.screenX || window.screenLeft || 0,
+            screenY: window.screenY || window.screenTop || 0,
+            outerWidth: window.outerWidth,
+            outerHeight: window.outerHeight,
+            innerWidth: window.innerWidth,
+            innerHeight: window.innerHeight,
+        };
+    }""")
+    
+    browser_log.info(f"  JS Window: screenX={window_info['screenX']}, screenY={window_info['screenY']}")
+    browser_log.info(f"  JS Inner: {window_info['innerWidth']}x{window_info['innerHeight']}")
+    browser_log.info(f"  JS Outer: {window_info['outerWidth']}x{window_info['outerHeight']}")
+    if win_geo:
+        browser_log.info(f"  xdotool Window: pos=({win_geo['x']},{win_geo['y']}), size={win_geo['width']}x{win_geo['height']}")
+    
+    # Calcular chrome offset (barra de título, tabs, URL bar)
+    chrome_height = window_info['outerHeight'] - window_info['innerHeight']
+    chrome_width_offset = (window_info['outerWidth'] - window_info['innerWidth']) // 2
+    browser_log.info(f"  Chrome height: {chrome_height}px, width_offset: {chrome_width_offset}px")
+    
+    # Determinar posição base da janela
+    if win_geo:
+        # Preferir xdotool (mais preciso no VNC)
+        base_x = win_geo['x']
+        base_y = win_geo['y']
+        browser_log.info(f"  Usando xdotool para base: ({base_x}, {base_y})")
+    else:
+        base_x = window_info['screenX']
+        base_y = window_info['screenY']
+        browser_log.info(f"  Usando JS para base: ({base_x}, {base_y})")
+    
+    # Método 1: Encontrar iframe do Cloudflare Turnstile via JS
     try:
         iframe_info = await page.evaluate("""() => {
-            // Procurar iframe do Turnstile
             const selectors = [
                 'iframe[src*="challenges.cloudflare.com"]',
                 'iframe[src*="turnstile"]',
@@ -476,7 +564,6 @@ async def find_and_click_turnstile(page):
                 }
             }
             
-            // Procurar o container .cf-turnstile
             const container = document.querySelector('.cf-turnstile, [data-sitekey]');
             if (container) {
                 const rect = container.getBoundingClientRect();
@@ -495,47 +582,24 @@ async def find_and_click_turnstile(page):
         }""")
         
         if iframe_info and iframe_info.get('found'):
-            browser_log.info(f"Turnstile encontrado via: {iframe_info['selector']}")
-            browser_log.info(f"  Posição no viewport: x={iframe_info['x']}, y={iframe_info['y']}")
+            browser_log.info(f"Turnstile encontrado via JS: {iframe_info['selector']}")
+            browser_log.info(f"  Viewport pos: x={iframe_info['x']}, y={iframe_info['y']}")
             browser_log.info(f"  Tamanho: {iframe_info['width']}x{iframe_info['height']}")
-            browser_log.info(f"  Src: {iframe_info.get('src', 'N/A')[:80]}")
             
-            # Agora precisamos converter coordenadas do viewport para coordenadas da tela
-            # Pegar a posição da janela do browser na tela
-            window_info = await page.evaluate("""() => {
-                return {
-                    screenX: window.screenX || window.screenLeft || 0,
-                    screenY: window.screenY || window.screenTop || 0,
-                    outerWidth: window.outerWidth,
-                    outerHeight: window.outerHeight,
-                    innerWidth: window.innerWidth,
-                    innerHeight: window.innerHeight,
-                };
-            }""")
-            
-            browser_log.info(f"  Window: screenX={window_info['screenX']}, screenY={window_info['screenY']}")
-            browser_log.info(f"  Inner: {window_info['innerWidth']}x{window_info['innerHeight']}")
-            browser_log.info(f"  Outer: {window_info['outerWidth']}x{window_info['outerHeight']}")
-            
-            # Calcular offset da barra de título/chrome do browser
-            chrome_height = window_info['outerHeight'] - window_info['innerHeight']
-            chrome_width_offset = (window_info['outerWidth'] - window_info['innerWidth']) // 2
-            
-            # O checkbox do Turnstile fica no lado esquerdo do iframe
-            # Aproximadamente 30px da borda esquerda e centralizado verticalmente
+            # O checkbox fica ~30px da borda esquerda, centralizado verticalmente
             checkbox_x_in_iframe = 30
             checkbox_y_in_iframe = iframe_info['height'] / 2
             
-            # Coordenadas absolutas na tela
-            screen_x = int(window_info['screenX'] + chrome_width_offset + iframe_info['x'] + checkbox_x_in_iframe)
-            screen_y = int(window_info['screenY'] + chrome_height + iframe_info['y'] + checkbox_y_in_iframe)
+            # Coordenadas na tela = base_janela + chrome_offset + posição_no_viewport + offset_checkbox
+            screen_x = int(base_x + chrome_width_offset + iframe_info['x'] + checkbox_x_in_iframe)
+            screen_y = int(base_y + chrome_height + iframe_info['y'] + checkbox_y_in_iframe)
             
-            browser_log.info(f"  Chrome height: {chrome_height}px")
-            browser_log.info(f"  Coordenadas de tela calculadas: ({screen_x}, {screen_y})")
+            browser_log.info(f"  Cálculo: base({base_x},{base_y}) + chrome(w={chrome_width_offset},h={chrome_height}) + viewport({iframe_info['x']},{iframe_info['y']}) + checkbox({checkbox_x_in_iframe},{checkbox_y_in_iframe})")
+            browser_log.info(f"  COORDENADAS FINAIS: ({screen_x}, {screen_y})")
             
             return screen_x, screen_y
     except Exception as e:
-        browser_log.warning(f"Erro ao localizar Turnstile: {e}")
+        browser_log.warning(f"Erro método 1 (JS): {e}")
     
     # Método 2: Procurar por frames do Playwright/Patchright
     try:
@@ -549,24 +613,10 @@ async def find_and_click_turnstile(page):
                     if box:
                         browser_log.info(f"  BoundingBox: x={box['x']}, y={box['y']}, w={box['width']}, h={box['height']}")
                         
-                        window_info = await page.evaluate("""() => {
-                            return {
-                                screenX: window.screenX || 0,
-                                screenY: window.screenY || 0,
-                                outerHeight: window.outerHeight,
-                                innerHeight: window.innerHeight,
-                                outerWidth: window.outerWidth,
-                                innerWidth: window.innerWidth,
-                            };
-                        }""")
+                        screen_x = int(base_x + chrome_width_offset + box['x'] + 30)
+                        screen_y = int(base_y + chrome_height + box['y'] + box['height'] / 2)
                         
-                        chrome_height = window_info['outerHeight'] - window_info['innerHeight']
-                        chrome_width_offset = (window_info['outerWidth'] - window_info['innerWidth']) // 2
-                        
-                        screen_x = int(window_info['screenX'] + chrome_width_offset + box['x'] + 30)
-                        screen_y = int(window_info['screenY'] + chrome_height + box['y'] + box['height'] / 2)
-                        
-                        browser_log.info(f"  Coordenadas de tela (método 2): ({screen_x}, {screen_y})")
+                        browser_log.info(f"  COORDENADAS FINAIS (método 2): ({screen_x}, {screen_y})")
                         return screen_x, screen_y
     except Exception as e:
         browser_log.warning(f"Erro método 2: {e}")
@@ -652,13 +702,22 @@ async def wait_for_turnstile(page, timeout=120):
 # VERIFICAR SE BOTÃO CONTINUE ESTÁ HABILITADO
 # ============================================================
 async def check_continue_enabled(page):
-    """Verifica se o botão Continue está habilitado (Turnstile resolvido)"""
+    """Verifica se o botão SUBMIT Continue está habilitado (ignora botões sociais)"""
     try:
         result = await page.evaluate("""() => {
             const btns = document.querySelectorAll('button');
+            // Palavras que indicam botões sociais (NÃO é o submit)
+            const socialKeywords = ['facebook', 'google', 'microsoft', 'apple', 'github', 'twitter'];
+            
             for (const btn of btns) {
                 const text = btn.textContent.trim().toLowerCase();
-                if (text.includes('continue') || text.includes('sign')) {
+                
+                // Pular botões de login social
+                const isSocial = socialKeywords.some(kw => text.includes(kw));
+                if (isSocial) continue;
+                
+                // Procurar o botão Continue/Sign que é o SUBMIT
+                if (text === 'continue' || text === 'sign up' || text === 'sign in' || btn.type === 'submit') {
                     return {
                         text: btn.textContent.trim(),
                         disabled: btn.disabled,
@@ -684,7 +743,7 @@ async def main():
     banner = f"""
 {C.CY}{C.BD}
 {'='*60}
-   MANUS ACCOUNT CREATOR V4 - KALI NETHUNTER + KeX
+   MANUS ACCOUNT CREATOR V5 - KALI NETHUNTER + KeX
    {engine}
    Turnstile: {click_method}
 {'='*60}
@@ -699,7 +758,7 @@ async def main():
     print(banner)
     
     log.info("=" * 60)
-    log.info(f"MANUS ACCOUNT CREATOR V4 INICIADO")
+    log.info(f"MANUS ACCOUNT CREATOR V5 INICIADO")
     log.info(f"Engine: {engine}")
     log.info(f"Click method: {click_method}")
     log.info(f"xdotool disponível: {XDOTOOL_AVAILABLE}")
@@ -1065,10 +1124,32 @@ async def main():
         log_separator("ETAPA 7: CLICANDO CONTINUE")
         
         try:
-            continue_btn = await page.wait_for_selector(
-                'button:has-text("Continue"), button:has-text("Sign"), button[type="submit"]',
-                timeout=10000
-            )
+            # Procurar APENAS o botão submit Continue (NÃO os botões sociais)
+            continue_btn = None
+            all_buttons = await page.query_selector_all('button')
+            for btn in all_buttons:
+                text = (await btn.text_content() or '').strip().lower()
+                # Ignorar botões sociais
+                social_keywords = ['facebook', 'google', 'microsoft', 'apple', 'github', 'twitter']
+                is_social = any(kw in text for kw in social_keywords)
+                if is_social:
+                    continue
+                # Procurar o botão submit
+                if text == 'continue' or text == 'sign up' or text == 'sign in':
+                    continue_btn = btn
+                    log.info(f"Botão submit encontrado: '{text}'")
+                    break
+                btn_type = await btn.get_attribute('type')
+                if btn_type == 'submit':
+                    continue_btn = btn
+                    log.info(f"Botão submit[type] encontrado: '{text}'")
+                    break
+            
+            if not continue_btn:
+                continue_btn = await page.wait_for_selector(
+                    'button[type="submit"]',
+                    timeout=5000
+                )
             if continue_btn:
                 is_disabled = await continue_btn.get_attribute('disabled')
                 if is_disabled:
@@ -1452,7 +1533,7 @@ if __name__ == "__main__":
     print(f"{C.CY}[*] Engine: {'PATCHRIGHT' if USING_PATCHRIGHT else 'PLAYWRIGHT'}{C.RS}")
     print(f"{C.CY}[*] xdotool: {'DISPONÍVEL' if XDOTOOL_AVAILABLE else 'NÃO ENCONTRADO'}{C.RS}")
     print(f"{C.CY}[*] DISPLAY={os.environ.get('DISPLAY')}{C.RS}")
-    print(f"{C.CY}[*] Iniciando V4...{C.RS}\n")
+    print(f"{C.CY}[*] Iniciando V5...{C.RS}\n")
     
     try:
         asyncio.run(main())
