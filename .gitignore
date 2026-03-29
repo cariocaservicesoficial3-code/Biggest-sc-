@@ -1,0 +1,21 @@
+# Logs de execução
+*.log
+
+# Credenciais geradas
+*_credentials.txt
+*_tokens.txt
+
+# Config local
+config.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# HAR files (contém dados sensíveis)
+*.har
