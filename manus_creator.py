@@ -1104,9 +1104,10 @@ async def main():
             if isinstance(handler, logging.FileHandler):
                 handler.close()
         
-        zip_name = f"{timestamp}_manus_logs_{status}.zip"
-        zip_path = os.path.join(LOG_DIR, zip_name)
+        # ZIP ÚNICO persistente - acumula logs de TODAS as execuções
+        zip_path = os.path.join(LOG_DIR, "MANUS_LOGS.zip")
         
+        # Coletar arquivos desta execução
         log_files_to_zip = [
             main_log_file,
             http_log_file,
@@ -1117,7 +1118,7 @@ async def main():
             responses_file,
         ]
         
-        # Adicionar screenshots
+        # Adicionar screenshots desta execução
         for f_name in os.listdir(LOG_DIR):
             full = os.path.join(LOG_DIR, f_name)
             if f_name.startswith(timestamp) and f_name.endswith('.png'):
@@ -1125,18 +1126,35 @@ async def main():
                     log_files_to_zip.append(full)
         
         try:
-            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+            # Modo 'a' = append - adiciona ao ZIP existente ou cria novo
+            with zipfile.ZipFile(zip_path, 'a', zipfile.ZIP_DEFLATED) as zf:
+                existing = set(zf.namelist())
+                added = 0
                 for lf in log_files_to_zip:
                     if os.path.exists(lf):
-                        zf.write(lf, os.path.basename(lf))
+                        arcname = os.path.basename(lf)
+                        # Se já existe (credentials/tokens), usar nome com timestamp
+                        if arcname in existing and arcname in ['manus_credentials.log', 'manus_tokens.log']:
+                            # Esses arquivos acumulam, substituir com versão atualizada
+                            pass  # zipfile 'a' não substitui, mas o conteúdo já está acumulado no arquivo
+                        elif arcname in existing:
+                            continue  # Já existe, pular
+                        zf.write(lf, arcname)
+                        added += 1
             
             zip_size = os.path.getsize(zip_path)
-            zip_size_kb = zip_size / 1024
+            if zip_size > 1048576:
+                zip_display = f"{zip_size / 1048576:.1f} MB"
+            else:
+                zip_display = f"{zip_size / 1024:.1f} KB"
             
-            print(f"\n{C.G}{C.BD}  [ZIP] Logs compactados com sucesso!{C.RS}")
-            print(f"  {C.G}  Arquivo: {zip_path}{C.RS}")
-            print(f"  {C.G}  Tamanho: {zip_size_kb:.1f} KB{C.RS}")
-            print(f"  {C.G}  Arquivos: {len([f for f in log_files_to_zip if os.path.exists(f)])}{C.RS}")
+            total_files = len(zipfile.ZipFile(zip_path, 'r').namelist())
+            
+            print(f"\n{C.G}{C.BD}  [ZIP] Logs adicionados ao ZIP único!{C.RS}")
+            print(f"  {C.G}  Arquivo:       {zip_path}{C.RS}")
+            print(f"  {C.G}  Tamanho total: {zip_display}{C.RS}")
+            print(f"  {C.G}  Adicionados:   {added} arquivos{C.RS}")
+            print(f"  {C.G}  Total no ZIP:  {total_files} arquivos{C.RS}")
         except Exception as e:
             print(f"\n{C.R}  [ERRO] Falha ao criar ZIP: {e}{C.RS}")
         
