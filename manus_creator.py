@@ -84,9 +84,9 @@ class C:
     RS = '\033[0m'
 
 # ============================================================
-# CONFIGURAÇÃO DE LOGS - TUDO EM /root/
+# CONFIGURAÇÃO DE LOGS - /sdcard/nh_files/MANUS LOGS/
 # ============================================================
-LOG_DIR = "/root"
+LOG_DIR = "/sdcard/nh_files/MANUS LOGS"
 os.makedirs(LOG_DIR, exist_ok=True)
 
 timestamp = datetime.now().strftime('%Y-%m-%d_%H%M%S')
@@ -502,7 +502,7 @@ async def main():
    DISPLAY:  {os.environ.get('DISPLAY', 'N/A')}
    Engine:   {engine}
    Proxy:    {PROXY_HOST}:{PROXY_PORT}
-   Log Dir:  {LOG_DIR}
+   Logs:    {LOG_DIR}
    Log File: {main_log_file}
 {'='*60}
 {C.RS}"""
@@ -1082,7 +1082,7 @@ async def main():
         with open(responses_file, 'w', encoding='utf-8') as f:
             json.dump(captured_data['all_responses'], f, indent=2, ensure_ascii=False)
         
-        print(f"\n{C.CY}{C.BD}  LOGS GERADOS EM /root/:{C.RS}")
+        print(f"\n{C.CY}{C.BD}  LOGS GERADOS:{C.RS}")
         print(f"  {C.CY}  Principal:   {main_log_file}{C.RS}")
         print(f"  {C.CY}  HTTP:        {http_log_file}{C.RS}")
         print(f"  {C.CY}  Browser:     {browser_log_file}{C.RS}")
