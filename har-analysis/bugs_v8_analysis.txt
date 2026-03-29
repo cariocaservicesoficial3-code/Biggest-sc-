@@ -1,0 +1,22 @@
+ANÁLISE DOS BUGS DO SCRIPT V8
+==============================
+
+BUG 1: MUDANÇA DE E-MAIL FALHA
+- Erro: "The POST method is not supported for this route. Supported methods: GET, HEAD."
+- Causa: O endpoint /en/change aceita GET, não POST
+- Solução: Usar page.goto() para navegar para a URL de mudança, ou usar a interface web
+  (clicar no botão "Change" na página e preencher o formulário)
+- Alternativa: Usar o e-mail gerado automaticamente (que é @sasmil.org) em vez de forçar @tousma.com
+  OU usar a API mobile com token válido
+
+BUG 2: SENHA NÃO ATENDE PADRÃO DO 2NR
+- Erro: {"error":1010,"keyword":"pattern","dataPath":"/password","schemaPath":"#/properties/password/allOf/3/pattern","params":{"pattern":"[?!@#$%^&*()<>+{}|_-]"}}
+- Causa: O 2NR exige que a senha contenha pelo menos 1 caractere especial do padrão: [?!@#$%^&*()<>+{}|_-]
+- O script V8 gera senhas apenas com letras e números (string.ascii_letters + string.digits)
+- Solução: Adicionar pelo menos 1 caractere especial obrigatório na geração de senha
+  Exemplo: "Kv4JwRtcv!yr" em vez de "Kv4JwRtcvSyr"
+
+CORREÇÕES PARA V9:
+1. Mudar a geração de senha para incluir caractere especial obrigatório
+2. Corrigir a mudança de e-mail para usar GET ou interação via UI do Playwright
+3. Se a mudança de e-mail falhar, usar o e-mail original gerado (funciona com qualquer domínio)

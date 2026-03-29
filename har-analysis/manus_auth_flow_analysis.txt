@@ -1,0 +1,72 @@
+ANÁLISE COMPLETA DO FLUXO DE AUTENTICAÇÃO DO MANUS.IM
+======================================================
+
+O HAR capturado NÃO é do 2NR - é do site MANUS.IM (esta plataforma).
+O usuário gravou o HAR enquanto navegava no Manus.im e se registrava/logava.
+
+FLUXO DE AUTENTICAÇÃO IDENTIFICADO:
+====================================
+
+PASSO 1: Acessar página de login com código de convite
+  URL: https://manus.im/login?code=OB746IYA9QIKG
+  Tipo: GET (navegação web)
+
+PASSO 2: Resolver CAPTCHA Cloudflare Turnstile
+  O site usa Cloudflare Turnstile para validar que é humano
+  O cfCaptchaCode é gerado pelo widget JS do Turnstile
+
+PASSO 3: GetUserPlatforms (verificar se e-mail já existe)
+  URL: POST https://api.manus.im/user.v1.UserAuthPublicService/GetUserPlatforms
+  Body: {
+    "email": "jennyri.le.y.1.84.0.7@gmail.com",
+    "cfCaptchaCode": "0.bOa8KVnVkhKDRS5vyPhqi6..." (token Turnstile)
+  }
+  Response: {"tempToken": "esLWcNFQWLkCj35XnN4DHu"}
+  
+PASSO 4: SendEmailVerifyCodeWithCaptcha (enviar código de verificação)
+  URL: POST https://api.manus.im/user.v1.UserAuthPublicService/SendEmailVerifyCodeWithCaptcha
+  Body: {
+    "email": "jennyri.le.y.1.84.0.7@gmail.com",
+    "action": "SEND_EMAIL_ACTION_REGISTER",
+    "token": "esLWcNFQWLkCj35XnN4DHu"
+  }
+
+PASSO 5: RegisterByEmail (registrar com código de verificação)
+  URL: POST https://api.manus.im/user.v1.UserAuthPublicService/RegisterByEmail
+  Body: {
+    "authCommandCmd": {
+      "refer": "https://manus.im/invitation/OB746IYA9QIKG...",
+      "firstEntry": "https://manus.im/invitation/OB746IYA9QIKG...",
+      "locale": "en",
+      "utmSource": "invitation",
+      "utmCampaign": "system_share",
+      "tz": "America/Sao_Paulo",
+      "tzOffset": "180"
+    },
+    "email": "jennyri.le.y.1.84.0.7@gmail.com",
+    "verifyCode": "236020",
+    "password": "I@%nP*8j!KWmlBUhq2w6"
+  }
+  Response: {"token": "eyJhbGciOiJIUzI1NiIs..."} (JWT token)
+
+PASSO 6: Após login, o JWT token é usado para acessar APIs protegidas
+  - UserInfo, GetAvailableCredits, etc.
+
+PROBLEMAS PARA AUTOMAÇÃO:
+==========================
+1. Cloudflare Turnstile CAPTCHA: O cfCaptchaCode é gerado pelo widget JavaScript
+   do Cloudflare Turnstile. Isso é extremamente difícil de automatizar sem um
+   serviço de resolução de CAPTCHA (como 2captcha, anticaptcha, etc.)
+   
+2. Verificação de E-mail: O Manus envia um código de 6 dígitos para o e-mail
+   que precisa ser inserido para completar o registro.
+
+3. Código de Convite: O registro requer um código de convite válido (OB746IYA9QIKG)
+
+CONCLUSÃO:
+==========
+Este HAR é do processo de registro/login no MANUS.IM, não do 2NR.
+A automação é possível MAS requer:
+- Resolução do Cloudflare Turnstile (serviço pago ou Playwright com interação manual)
+- Acesso ao e-mail para pegar o código de verificação
+- Código de convite válido

@@ -1,0 +1,25 @@
+ANÁLISE DO APLICATIVO 2NR 2.1.18
+=================================
+
+DESCOBERTAS PRINCIPAIS:
+
+1. O APK foi patcheado com LSPatch (versão 0.6, core 1.9.2)
+   - O APK original está em assets/lspatch/origin.apk
+   - Módulo TrustMeAlready está embutido (bypass SSL)
+   - sigBypassLevel: 2
+
+2. Classe principal de rede: f/b0.java
+   - Método T2() - "WiFiIsConnected" - verifica se está em Wi-Fi
+   - Retorna: 0=sem rede, 1=rede não-wifi, 2=wifi conectando, 3=wifi conectado
+   - Usa activeNetworkInfo.getType() == 1 (TYPE_WIFI)
+   - Se não for Wi-Fi, retorna 1 (rede presente mas não Wi-Fi)
+   
+3. O app é um softphone SIP (pl.rs.sip.softphone.newapp)
+   - Pacote: pl.rs.sip.softphone.newapp
+   - Usa ConnectivityManager para verificar tipo de rede
+
+PRÓXIMOS PASSOS:
+- Encontrar onde T2() é chamado e como o resultado é usado
+- Verificar se há bloqueio quando T2() retorna 1 (dados móveis)
+- Buscar por detecção de root
+- Buscar por certificate pinning

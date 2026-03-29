@@ -1,0 +1,37 @@
+ANÁLISE DA API WEB DO TEMPORARY-EMAIL.ORG (TOUSMA.COM) - VERSÃO FINAL
+=====================================================================
+
+A API WEB funciona de forma diferente da API mobile:
+- A página web (temporary-email.org/en) gera um e-mail automaticamente ao carregar
+- O e-mail é retornado via endpoint /en/messages?_={timestamp}
+- A sessão é mantida por cookies (temporaryemail_session, XSRF-TOKEN, cf_clearance)
+
+FLUXO WEB (SEM API KEY):
+========================
+
+1. ACESSAR PÁGINA: GET /en
+   - O servidor gera automaticamente um e-mail temporário
+   - Cookies de sessão são criados: temporaryemail_session, XSRF-TOKEN, email, cf_clearance
+
+2. VERIFICAR CAIXA DE ENTRADA: GET /en/messages?_={timestamp}
+   - Retorna: {"mailbox":"epozyov175@tousma.com","messages":[]}
+   - Quando há mensagens, o campo "messages" terá os e-mails
+
+3. MUDAR E-MAIL: POST /en/change (com XSRF-TOKEN)
+   - Permite trocar o nome do e-mail mantendo o domínio
+
+4. DELETAR: POST /en/delete (com XSRF-TOKEN)
+
+COOKIES IMPORTANTES:
+- cf_clearance: Token do Cloudflare (necessário para bypass)
+- temporaryemail_session: Sessão do Laravel
+- XSRF-TOKEN: Token CSRF para operações POST
+- email: Token criptografado do e-mail atual
+
+ESTRATÉGIA PARA O SCRIPT V8:
+1. Usar Playwright para acessar /en e resolver Cloudflare automaticamente
+2. Extrair o e-mail gerado da resposta de /en/messages
+3. Usar esse e-mail para registrar no 2NR
+4. Fazer polling em /en/messages até o e-mail de confirmação chegar
+5. Extrair o link de confirmação do corpo do e-mail
+6. Validar via Playwright

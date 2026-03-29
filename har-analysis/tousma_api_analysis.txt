@@ -1,0 +1,38 @@
+ANÁLISE DA API DO TEMPORARY-EMAIL.ORG (TOUSMA.COM)
+===================================================
+
+BASE URL: https://temporary-email.org
+API KEY (fixa no HAR): nMpKDjd1baWWIBl7p357s1ac7RCbwWp1F8aLDB5n
+FCM TOKEN (push notifications): ezCgeNl_QWu3AMzYslGqL6:APA91bGJXsgvwpc9DAndS5_Oi9vpTqkuNP6otFfXoYlY6Kdnix7ZRwp_x25GV9W2K56IYjdaQjRBLYgx4gxXiSNePukWUT-Gi3z6S2L_--28OmMIbmz4fE4
+USER-AGENT: Dart/3.8 (dart:io)
+
+FLUXO DA API:
+=============
+
+1. LISTAR DOMÍNIOS DISPONÍVEIS:
+   GET /api/domains/{API_KEY}
+   Response: {"status":"success","data":{"domains":{"1":"biomails.com","2":"tousma.com","3":"sasmil.org","4":"omailo.top","5":"ingam.top"}}}
+
+2. CRIAR/MUDAR E-MAIL:
+   POST /api/email/change/{EMAIL_TOKEN}/{NOME_USUARIO}/{DOMINIO}/{API_KEY}/{FCM_TOKEN}
+   - EMAIL_TOKEN: Token criptografado da sessão anterior (ou token inicial)
+   - NOME_USUARIO: Nome desejado (ex: "Sorocaba")
+   - DOMINIO: Domínio escolhido (ex: "tousma.com")
+   - API_KEY: Chave fixa
+   - FCM_TOKEN: Token de push notification (pode ser qualquer string)
+   Response: {"status":"success","data":{"email_token":"...novo_token...","deleted_in":"2026-04-03 06:28:30","email":"Sorocaba@tousma.com"}}
+
+3. VERIFICAR CAIXA DE ENTRADA:
+   GET /api/messages/{EMAIL_TOKEN}/{API_KEY}
+   Response: {"status":"success","data":{"mailbox":"Danie@tousma.com","messages":[]}}
+   (Quando tiver mensagem, o campo "messages" terá os e-mails)
+
+4. VERIFICAR WAF (ANTI-BOT):
+   GET /mobile/WAF.json
+   Response: {"Banned":false,"Reason":"whitelisted on DB",...}
+
+OBSERVAÇÕES:
+- O EMAIL_TOKEN muda a cada operação de "change"
+- O API_KEY parece ser fixo (mesmo em múltiplas sessões)
+- O FCM_TOKEN é do Firebase Cloud Messaging (pode ser gerado ou usar qualquer string)
+- O primeiro EMAIL_TOKEN precisa ser obtido de alguma forma (possivelmente da primeira criação)
