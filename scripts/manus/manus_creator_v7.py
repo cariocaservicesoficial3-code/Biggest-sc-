@@ -2187,24 +2187,21 @@ async def main():
                 '--disable-blink-features=AutomationControlled',
             ])
         
-        # V7.2: PROXY ROTATIVA SEMPRE ATIVA
-        # Garante IP limpo para o Cloudflare não bloquear
-        launch_kwargs = {
-            'headless': False,
-            'args': browser_args,
-            'proxy': {
-                'server': f'http://{PROXY_HOST}:{PROXY_PORT}',
-                'username': PROXY_USER,
-                'password': PROXY_PASS,
-            },
-        }
-        log.info(f"[NET] PROXY ROTATIVA ATIVA: {PROXY_HOST}:{PROXY_PORT}")
+        # V7.2 FIX: PROXY ROTATIVA per-context (CORRIGIDO)
+        # No Playwright/Patchright, proxy com autenticação DEVE ser no context, não no launch
+        # launch() recebe 'per-context' e new_context() recebe os dados reais
+        log.info(f"[NET] PROXY ROTATIVA: {PROXY_HOST}:{PROXY_PORT}")
         log.info(f"[NET] User: {PROXY_USER[:10]}... | Rotação: BR")
+        log.info(f"[NET] Modo: per-context (autenticação no context, não no launch)")
         
         try:
-            browser = await p.chromium.launch(**launch_kwargs)
-            browser_log.info(f"Browser lançado! Engine: {engine} | Proxy: SEMPRE")
-            log.info(f"Browser aberto no desktop KeX com PROXY ROTATIVA!")
+            browser = await p.chromium.launch(
+                headless=False,
+                args=browser_args,
+                proxy={'server': 'per-context'},
+            )
+            browser_log.info(f"Browser lançado! Engine: {engine} | Proxy: per-context")
+            log.info(f"Browser aberto no desktop KeX!")
         except Exception as e:
             log.error(f"FALHA ao lançar browser: {e}")
             log.error(traceback.format_exc())
@@ -2214,7 +2211,13 @@ async def main():
             user_agent=USER_AGENT,
             viewport={'width': 1200, 'height': 680},
             locale='en-US',
+            proxy={
+                'server': f'http://{PROXY_HOST}:{PROXY_PORT}',
+                'username': PROXY_USER,
+                'password': PROXY_PASS,
+            },
         )
+        log.info(f"[NET] Context criado com PROXY AUTENTICADA!")
         
         # === INJETAR TODOS OS SCRIPTS DE STEALTH V7 ===
         stealth_code = get_stealth_scripts(use_patchright=USING_PATCHRIGHT)
