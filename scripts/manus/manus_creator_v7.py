@@ -2019,7 +2019,7 @@ async def main():
    Engine:   {engine}
    Click:    {click_method}
    DISPLAY:  {os.environ.get('DISPLAY', 'N/A')}
-   Proxy:    {PROXY_HOST}:{PROXY_PORT}
+   Proxy:    {PROXY_HOST}:{PROXY_PORT} (SEMPRE ATIVA)
    CAPTCHA:  {CAPTCHA_SERVICE if CAPTCHA_API_KEY else 'LOCAL ONLY'}
    Logs:     {LOG_DIR}
 {'='*60}
@@ -2187,24 +2187,24 @@ async def main():
                 '--disable-blink-features=AutomationControlled',
             ])
         
-        # V7.2: Adicionar proxy se necessário
+        # V7.2: PROXY ROTATIVA SEMPRE ATIVA
+        # Garante IP limpo para o Cloudflare não bloquear
         launch_kwargs = {
             'headless': False,
             'args': browser_args,
-        }
-        
-        if use_proxy_for_browser:
-            launch_kwargs['proxy'] = {
+            'proxy': {
                 'server': f'http://{PROXY_HOST}:{PROXY_PORT}',
                 'username': PROXY_USER,
                 'password': PROXY_PASS,
-            }
-            log.info(f"[NET] Browser com PROXY: {PROXY_HOST}:{PROXY_PORT}")
+            },
+        }
+        log.info(f"[NET] PROXY ROTATIVA ATIVA: {PROXY_HOST}:{PROXY_PORT}")
+        log.info(f"[NET] User: {PROXY_USER[:10]}... | Rotação: BR")
         
         try:
             browser = await p.chromium.launch(**launch_kwargs)
-            browser_log.info(f"Browser lançado! Engine: {engine} | Proxy: {use_proxy_for_browser}")
-            log.info(f"Browser aberto no desktop KeX!")
+            browser_log.info(f"Browser lançado! Engine: {engine} | Proxy: SEMPRE")
+            log.info(f"Browser aberto no desktop KeX com PROXY ROTATIVA!")
         except Exception as e:
             log.error(f"FALHA ao lançar browser: {e}")
             log.error(traceback.format_exc())
